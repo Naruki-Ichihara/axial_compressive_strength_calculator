@@ -2,35 +2,58 @@ import numpy as np
 import numba
 from skimage.feature import structure_tensor
 import pandas as pd
+from typing import Optional, Tuple, Union, List, Dict
 
 def drop_edges_3D(width: int, volume: np.ndarray) -> np.ndarray:
-    """Drop edges of 3D volume.
+    """
+    Remove edge pixels from all sides of a 3D volume to eliminate boundary artifacts.
+    
+    This function crops the volume by removing 'width' pixels from each face,
+    effectively reducing each dimension by 2*width pixels.
 
     Args:
-        width (int): Width of edges.
-        volume (np.ndarray): 3D volume.
+        width: Number of pixels to remove from each edge (must be positive).
+        volume: Input 3D array with shape (depth, height, width).
 
     Returns:
-        np.ndarray: 3D volume without edges.
-
+        Cropped 3D volume with shape (depth-2*width, height-2*width, width-2*width).
+        
+    Raises:
+        ValueError: If width is larger than half of any volume dimension.
+        
+    Example:
+        >>> vol = np.random.rand(100, 200, 200)
+        >>> cropped = drop_edges_3D(10, vol)
+        >>> print(cropped.shape)  # (80, 180, 180)
     """
     return volume[width:volume.shape[0]-width, width:volume.shape[1]-width, width:volume.shape[2]-width]
 
 def compute_structure_tensor(volume: np.ndarray, noise_scale: int, mode: str = 'nearest') -> np.ndarray:
     """
-    Computes the structure tensor of a 3D volume. Based on the skimage feature structure_tensor function.
+    Compute 3D structure tensor for fiber orientation analysis using gradient-based methods.
+    
+    The structure tensor is a symmetric 3x3 matrix field that captures local orientation
+    information in 3D volumes. Each voxel gets a tensor describing the predominant
+    direction of intensity gradients in its neighborhood.
 
     Args:
-        volume (np.ndarray): The input 3D volume.
-        noise_scale (int): The scale for the Gaussian filter.
-        mode (str): The mode for the Gaussian filter. Default is 'nearest'. 
-                    See [skimage doc.](https://scikit-image.org/docs/stable/api/skimage.feature.html#skimage.feature.structure_tensor)
+        volume: Input 3D grayscale volume (depth, height, width).
+        noise_scale: Gaussian smoothing sigma for noise reduction before gradient computation.
+                    Larger values provide more smoothing but reduce spatial resolution.
+        mode: Boundary condition for Gaussian filtering.
+             Options: 'constant', 'edge', 'wrap', 'reflect', 'mirror', 'nearest'.
+             See scikit-image documentation for details.
 
     Returns:
-        np.ndarray: The structure tensor of the input volume.
+        Structure tensor array with shape (6, depth, height, width).
+        Components represent the upper triangular part of the symmetric 3x3 tensor:
+        [T_xx, T_xy, T_xz, T_yy, T_yz, T_zz] where T_ij = ∇I_i * ∇I_j.
     
     Raises:
-        ValueError: If the input volume is not 3D.
+        ValueError: If the input volume is not exactly 3D.
+        
+    Note:
+        Uses float32 precision for memory efficiency in large volume processing.
     """
     if volume.ndim != 3:
         raise ValueError("Input volume must be 3D.")
@@ -41,7 +64,7 @@ def compute_structure_tensor(volume: np.ndarray, noise_scale: int, mode: str = '
     return tensors
 
 @numba.njit(parallel=True, cache=True)
-def _orientation_function(structureTensor):
+def _orientation_function(structureTensor: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     symmetricComponents3d = [[0, 0], [0, 1], [0, 2], [1, 1], [1, 2], [2, 2]]
 
     theta = np.zeros(structureTensor.shape[1:], dtype="<f4")
@@ -70,7 +93,7 @@ def _orientation_function(structureTensor):
     return theta, phi
 
 @numba.njit(parallel=True, cache=True)
-def _orientation_function_reference(structureTensor, reference_vector):
+def _orientation_function_reference(structureTensor: np.ndarray, reference_vector: np.ndarray) -> np.ndarray:
 
     symmetricComponents3d = [[0, 0], [0, 1], [0, 2], [1, 1], [1, 2], [2, 2]]
 
@@ -98,15 +121,32 @@ def _orientation_function_reference(structureTensor, reference_vector):
 
     return theta
 
-def compute_orientation(structure_tensor: np.ndarray, reference_vector=None) -> tuple:
-    """ Compute orientation function.
+def compute_orientation(structure_tensor: np.ndarray, reference_vector: Optional[List[float]] = None) -> Union[Tuple[np.ndarray, np.ndarray], np.ndarray]:
+    """
+    Extract fiber orientation angles from structure tensor using eigenvalue decomposition.
+    
+    Computes orientation angles by finding the eigenvector corresponding to the smallest
+    eigenvalue of each structure tensor, which represents the direction of minimal
+    intensity variation (i.e., the fiber direction).
 
     Args:
-        structureTensor (np.ndarray): Structure tensor.
-        reference_vector (list, optional): Reference vector. If None, the function computes the orientation without a reference vector.
+        structure_tensor: 4D array with shape (6, depth, height, width) containing
+                         the symmetric structure tensor components.
+        reference_vector: Optional 3D reference direction vector [x, y, z].
+                         If provided, returns only the angle relative to this reference.
+                         If None, returns both theta and phi spherical angles.
 
     Returns:
-        tuple: Orientation angles.
+        If reference_vector is None:
+            Tuple of (theta, phi) arrays with shape (depth, height, width).
+            theta: Azimuthal angle in degrees (-180 to 180).
+            phi: Elevation angle in degrees (-90 to 90).
+        If reference_vector is provided:
+            Single array of angles in degrees (0 to 180) relative to reference.
+            
+    Note:
+        Uses JIT compilation for performance. Progress messages printed during computation.
+        Eigenvector signs are normalized for consistency (x-component made positive).
     """
     if reference_vector is None:
         print("[INFO] Computing orientation function without reference vector.")
@@ -120,47 +160,3 @@ def compute_orientation(structure_tensor: np.ndarray, reference_vector=None) -> 
         theta = _orientation_function_reference(structure_tensor, reference_vector)
         print("[INFO] Progress complete.")
         return theta
-    
-def compute_static_data(theta: np.ndarray, phi: np.ndarray, varphi: np.ndarray, drop=10) -> pd.DataFrame:
-    """ Compute static data.
-
-    Args:
-        theta (np.ndarray): Theta angles.
-        phi (np.ndarray): Phi angles.
-        varphi (np.ndarray): Varphi angles.
-        drop (int): Number of pixels to drop from edges.
-
-    Returns:
-        pd.DataFrame: Static data.
-    """
-    theta = drop_edges_3D(drop, theta)
-    phi = drop_edges_3D(drop, phi)
-    varphi = drop_edges_3D(drop, varphi)
-
-    # Flatten the arrays
-    flatten_theta = theta.ravel()
-    flatten_phi = phi.ravel()
-    flatten_varphi = varphi.ravel()
-
-    # Histogram
-    hist_theta, bins_theta = np.histogram(flatten_theta, bins=1000, density=True)
-    hist_phi, bins_phi = np.histogram(flatten_phi, bins=1000, density=True)
-    hist_varphi, bins_varphi = np.histogram(flatten_varphi, bins=1000, density=True)
-
-    # Pandas Series
-    hist_theta_series = pd.Series(hist_theta, name="Histgram")
-    bin_theta_series = pd.Series(bins_theta[1:], name="Bin")
-    hist_phi_series = pd.Series(hist_phi, name="Histgram")
-    bin_phi_series = pd.Series(bins_phi[1:], name="Bin")
-    hist_varphi_series = pd.Series(hist_varphi, name="Histgram")
-    bin_varphi_series = pd.Series(bins_varphi[1:], name="Bin")
-
-    # Pandas DF
-    static_df_theta = pd.DataFrame([bin_theta_series, hist_theta_series], index=["Bin (theta)", "Histgram (theta)"]).transpose()
-    static_df_phi = pd.DataFrame([bin_phi_series, hist_phi_series], index=["Bin (phi)", "Histgram (phi)"]).transpose()
-    setatic_df_varphi = pd.DataFrame([bin_varphi_series, hist_varphi_series], index=["Bin (varphi)", "Histgram (varphi)"]).transpose()
-
-    # Combine dataframes
-    static_df = pd.concat([static_df_theta, static_df_phi, setatic_df_varphi], axis=1)
-
-    return static_df

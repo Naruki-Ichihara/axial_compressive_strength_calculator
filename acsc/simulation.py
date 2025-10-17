@@ -3,10 +3,28 @@ from scipy.interpolate import interp1d
 from scipy.signal import argrelmax, argrelmin, find_peaks
 import scipy.stats as stats
 from dataclasses import dataclass
+from typing import Tuple
 
 @dataclass
 class MaterialParams:
-    """Material parameters for the simulation."""
+    """
+    Immutable container for composite material properties used in strength calculations.
+    
+    Defines the mechanical properties needed for fiber-reinforced composite analysis,
+    including elastic moduli, plasticity parameters, and geometric factors.
+    
+    Attributes:
+        longitudinal_modulus: E1, elastic modulus parallel to fiber direction (MPa).
+        transverse_modulus: E2, elastic modulus perpendicular to fibers (MPa).
+        poisson_ratio: ν, ratio of transverse to longitudinal strain under axial loading.
+        shear_modulus: G, resistance to shear deformation (MPa).
+        tau_y: Yield stress in shear for plasticity model (MPa).
+        K: Hardening coefficient for power-law plasticity.
+        n: Hardening exponent for power-law plasticity (dimensionless).
+        
+    Note:
+        Power-law plasticity model: γ = τ/G + K(τ/τ_y)^n where γ is shear strain.
+    """
     longitudinal_modulus: float
     transverse_modulus: float
     poisson_ratio: float
@@ -17,25 +35,42 @@ class MaterialParams:
 
 def estimate_compression_strength_from_profile(orientation_profile: np.ndarray,
                                                material_params: MaterialParams,
-                                               maximum_shear_stress: float=100.0,
-                                               shear_stress_step_size: float=0.1,
-                                               maximum_axial_strain: float=0.02,
-                                               maximum_fiber_misalignment: float=20,
-                                               fiber_misalignment_step_size: float=0.1) -> tuple[float, float, np.ndarray, np.ndarray]:
+                                               maximum_shear_stress: float = 100.0,
+                                               shear_stress_step_size: float = 0.1,
+                                               maximum_axial_strain: float = 0.02,
+                                               maximum_fiber_misalignment: float = 20,
+                                               fiber_misalignment_step_size: float = 0.1) -> Tuple[float, float, np.ndarray, np.ndarray]:
     """
-    Estimate the compression strength of a composite material considering fiber misalignment deviation.
+    Calculate compression strength from measured fiber orientation distribution.
+    
+    Implements a micromechanical model that accounts for fiber misalignment effects
+    on composite compression strength. Uses power-law plasticity for matrix behavior
+    and superposition of stress contributions from different misalignment angles.
 
     Args:
-        orientation_profile: Orientation profile of the composite material.
-        material_params: Material parameters of the composite material.
-        maximum_shear_stress: Maximum shear stress in MPa.
-        shear_stress_step_size: Shear stress step size in MPa.
-        maximum_axial_strain: Maximum axial strain.
-        maximum_fiber_misalignment: Maximum fiber misalignment angle in degrees.
-        fiber_misalignment_step_size: Fiber misalignment step size in degrees.
+        orientation_profile: 3D array of fiber misalignment angles in degrees.
+                           Should contain the actual measured orientation data.
+        material_params: Complete set of material properties for the composite.
+        maximum_shear_stress: Upper bound for shear stress integration (MPa).
+        shear_stress_step_size: Resolution for shear stress discretization (MPa).
+        maximum_axial_strain: Maximum compressive strain for analysis.
+        maximum_fiber_misalignment: Upper bound for misalignment angle range (degrees).
+        fiber_misalignment_step_size: Angular resolution for misalignment discretization (degrees).
 
     Returns:
-        A tuple containing two numpy arrays: axial stress array and axial strain array.
+        Tuple containing:
+        - compression_strength: Peak compressive stress (MPa)
+        - ultimate_strain: Strain at peak stress
+        - stress_curve: Complete stress-strain curve array
+        - strain_array: Corresponding strain values
+        
+    Raises:
+        ValueError: If the misalignment range doesn't capture enough probability mass (< 99.9%).
+        
+    Note:
+        Uses histogram analysis of the orientation profile to determine probability
+        weights for different misalignment angles. Applies incremental loading with
+        power-law matrix plasticity model.
     """
 
     E1 = material_params.longitudinal_modulus
@@ -97,11 +132,11 @@ def estimate_compression_strength_from_profile(orientation_profile: np.ndarray,
             axial_strain_matrix[i, :] = constant_interval_strain_array
             axial_stress_matrix[i, :] = constant_interval_stress_array
 
-    # Probability distribution of fiber misalignment
+    # Probability distribution of fiber misalignment from measured data
     flatten_orientation_profile = orientation_profile.ravel()
     probability, bins = np.histogram(flatten_orientation_profile,
-                                                  bins=int(maximum_fiber_misalignment/fiber_misalignment_step_size), 
-                                                  density=True, range=(0, maximum_fiber_misalignment))
+                                     bins=int(maximum_fiber_misalignment/fiber_misalignment_step_size), 
+                                     density=True, range=(0, maximum_fiber_misalignment))
     for i in range(1, len(probability)):
         probability[i] = probability[i]*fiber_misalignment_step_size
     
@@ -133,26 +168,42 @@ def estimate_compression_strength_from_profile(orientation_profile: np.ndarray,
 def estimate_compression_strength(initial_misalignment: float,
                          standard_deviation: float,
                          material_params: MaterialParams,
-                         maximum_shear_stress: float=100.0,
-                         shear_stress_step_size: float=0.1,
-                         maximum_axial_strain: float=0.02,
-                         maximum_fiber_misalignment: float=20,
-                         fiber_misalignment_step_size: float=0.1) -> tuple[float, float, np.ndarray, np.ndarray]:
+                         maximum_shear_stress: float = 100.0,
+                         shear_stress_step_size: float = 0.1,
+                         maximum_axial_strain: float = 0.02,
+                         maximum_fiber_misalignment: float = 20,
+                         fiber_misalignment_step_size: float = 0.1) -> Tuple[float, float, np.ndarray, np.ndarray]:
     """
-    Estimate the compression strength of a composite material considering fiber misalignment deviation.
+    Calculate compression strength assuming Gaussian distribution of fiber misalignment.
+    
+    Theoretical model variant that uses a normal distribution to describe fiber
+    misalignment rather than measured data. Applies symmetric probability weights
+    for positive and negative misalignment angles around the mean.
 
     Args:
-        initial_misalignment: Initial fiber misalignment angle in degrees.
-        standard_deviation: Standard deviation of fiber misalignment angle in degrees.
-        material_params: Material parameters of the composite material.
-        maximum_shear_stress: Maximum shear stress in MPa.
-        shear_stress_step_size: Shear stress step size in MPa.
-        maximum_axial_strain: Maximum axial strain.
-        maximum_fiber_misalignment: Maximum fiber misalignment angle in degrees.
-        fiber_misalignment_step_size: Fiber misalignment step size in degrees.
+        initial_misalignment: Mean fiber misalignment angle in degrees.
+        standard_deviation: Standard deviation of misalignment distribution in degrees.
+        material_params: Complete set of material properties for the composite.
+        maximum_shear_stress: Upper bound for shear stress integration (MPa).
+        shear_stress_step_size: Resolution for shear stress discretization (MPa).
+        maximum_axial_strain: Maximum compressive strain for analysis.
+        maximum_fiber_misalignment: Upper bound for misalignment angle range (degrees).
+        fiber_misalignment_step_size: Angular resolution for misalignment discretization (degrees).
 
     Returns:
-        A tuple containing two numpy arrays: axial stress array and axial strain array.
+        Tuple containing:
+        - compression_strength: Peak compressive stress (MPa)
+        - ultimate_strain: Strain at peak stress  
+        - stress_curve: Complete stress-strain curve array
+        - strain_array: Corresponding strain values
+        
+    Raises:
+        ValueError: If the misalignment range doesn't capture enough probability mass (< 99.9%).
+        
+    Note:
+        Uses scipy.stats.norm.cdf for probability calculations. Considers both positive
+        and negative misalignments symmetrically around the mean value. Requires larger
+        misalignment range for highly dispersed distributions.
     """
 
     E1 = material_params.longitudinal_modulus
@@ -218,7 +269,7 @@ def estimate_compression_strength(initial_misalignment: float,
     mean_value = np.deg2rad(initial_misalignment)
     std_value = np.deg2rad(standard_deviation)
 
-    # Right-side
+    # Right-side (positive misalignments)
     probabilties_right_array = []
     for i in range(1, len(misalignment_array)):
         probabilty = stats.norm.cdf(np.deg2rad(misalignment_array[i]+fiber_misalignment_step_size/2), mean_value, std_value)\
@@ -226,7 +277,7 @@ def estimate_compression_strength(initial_misalignment: float,
         probabilties_right_array.append(probabilty)
     probabilties_right_array = np.array(probabilties_right_array)
 
-    # Left-side
+    # Left-side (negative misalignments)
     probabilties_left_array = []
     for i in range(1, len(misalignment_array)):
         probabilty = stats.norm.cdf(np.deg2rad(-misalignment_array[i]+fiber_misalignment_step_size/2), mean_value, std_value)\
@@ -234,7 +285,7 @@ def estimate_compression_strength(initial_misalignment: float,
         probabilties_left_array.append(probabilty)
     probabilties_left_array = np.array(probabilties_left_array)
 
-    # Center
+    # Center (near-zero misalignments)
     probabilty_center = stats.norm.cdf(np.deg2rad(fiber_misalignment_step_size/2), mean_value, std_value)\
                         - stats.norm.cdf(np.deg2rad(-fiber_misalignment_step_size/2), mean_value, std_value)
 
