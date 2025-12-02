@@ -39,7 +39,9 @@ def estimate_compression_strength_from_profile(orientation_profile: np.ndarray,
                                                shear_stress_step_size: float = 0.1,
                                                maximum_axial_strain: float = 0.02,
                                                maximum_fiber_misalignment: float = 20,
-                                               fiber_misalignment_step_size: float = 0.1) -> Tuple[float, float, np.ndarray, np.ndarray]:
+                                               fiber_misalignment_step_size: float = 0.1,
+                                               kink_width: float = None,
+                                               gauge_length: float = None) -> Tuple[float, float, np.ndarray, np.ndarray]:
     """
     Calculate compression strength from measured fiber orientation distribution.
     
@@ -155,6 +157,13 @@ def estimate_compression_strength_from_profile(orientation_profile: np.ndarray,
         superposition_axial_stress_array[i] = np.sum(weighted_axial_stress_matrix[1:, i])
     axial_strain_array = np.linspace(0, maximum_axial_strain, shear_stress_array.size)
 
+    # Apply kink width and gauge length correction if specified
+    # ε̄_x = ε_x * (w_k/L_g) + σ_x/E_11 * (1 - w_k/L_g)
+    if kink_width is not None and gauge_length is not None and gauge_length > 0:
+        w_k_over_L_g = kink_width / gauge_length
+        axial_strain_array = (axial_strain_array * w_k_over_L_g +
+                              superposition_axial_stress_array / E1 * (1 - w_k_over_L_g))
+
     if not find_peaks(superposition_axial_stress_array)[0].size == 0:
         compression_strength_index = find_peaks(superposition_axial_stress_array)[0][0]
         compression_strength = superposition_axial_stress_array[compression_strength_index]
@@ -172,7 +181,9 @@ def estimate_compression_strength(initial_misalignment: float,
                          shear_stress_step_size: float = 0.1,
                          maximum_axial_strain: float = 0.02,
                          maximum_fiber_misalignment: float = 20,
-                         fiber_misalignment_step_size: float = 0.1) -> Tuple[float, float, np.ndarray, np.ndarray]:
+                         fiber_misalignment_step_size: float = 0.1,
+                         kink_width: float = None,
+                         gauge_length: float = None) -> Tuple[float, float, np.ndarray, np.ndarray]:
     """
     Calculate compression strength assuming Gaussian distribution of fiber misalignment.
     
@@ -309,6 +320,13 @@ def estimate_compression_strength(initial_misalignment: float,
         superposition_axial_stress_array[i] = np.sum(weighted_axial_stress_matrix_right[1:, i]) + np.sum(weighted_axial_stress_matrix_left[1:, i])
     superposition_axial_stress_array += weighted_axial_stress_center
     axial_strain_array = np.linspace(0, maximum_axial_strain, shear_stress_array.size)
+
+    # Apply kink width and gauge length correction if specified
+    # ε̄_x = ε_x * (w_k/L_g) + σ_x/E_11 * (1 - w_k/L_g)
+    if kink_width is not None and gauge_length is not None and gauge_length > 0:
+        w_k_over_L_g = kink_width / gauge_length
+        axial_strain_array = (axial_strain_array * w_k_over_L_g +
+                              superposition_axial_stress_array / E1 * (1 - w_k_over_L_g))
 
     if not find_peaks(superposition_axial_stress_array)[0].size == 0:
         compression_strength_index = find_peaks(superposition_axial_stress_array)[0][0]

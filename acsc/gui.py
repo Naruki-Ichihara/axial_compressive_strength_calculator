@@ -989,8 +989,9 @@ class HistogramPanel(QWidget):
 
 class Viewer2D(QWidget):
     """Lightweight 2D slice viewer showing three orthogonal views"""
-    def __init__(self):
+    def __init__(self, parent_window=None):
         super().__init__()
+        self.parent_window = parent_window  # Reference to main window for slider sync
         self.current_volume = None
         self.base_volume = None
         self.overlay_volume = None
@@ -1072,33 +1073,48 @@ class Viewer2D(QWidget):
 
         # XY view (left)
         self.figure_xy = Figure(figsize=(4, 4), facecolor='#f5f5f5')
+        # Add extra space on left and bottom for axis arrows
+        self.figure_xy.subplots_adjust(left=0.25, right=0.95, bottom=0.15, top=0.95)
         self.canvas_xy = FigureCanvas(self.figure_xy)
         self.ax_xy = self.figure_xy.add_subplot(111)
         self.ax_xy.set_title('XY Plane (Z slice)', fontsize=10, fontweight='bold')
         self.ax_xy.set_aspect('equal')
         self.ax_xy.axis('off')
+        # Draw axis arrows even before image is loaded
+        self._drawAxisArrows(self.ax_xy, 'xy', None)
+        self.canvas_xy.draw()
         viewers_splitter.addWidget(self.canvas_xy)
         # Connect mouse wheel event for Z slice control
         self.canvas_xy.mpl_connect('scroll_event', self.onScrollXY)
 
         # XZ view (center)
         self.figure_xz = Figure(figsize=(4, 4), facecolor='#f5f5f5')
+        # Add extra space on left and bottom for axis arrows
+        self.figure_xz.subplots_adjust(left=0.25, right=0.95, bottom=0.15, top=0.95)
         self.canvas_xz = FigureCanvas(self.figure_xz)
         self.ax_xz = self.figure_xz.add_subplot(111)
         self.ax_xz.set_title('XZ Plane (Y slice)', fontsize=10, fontweight='bold')
         self.ax_xz.set_aspect('equal')
         self.ax_xz.axis('off')
+        # Draw axis arrows even before image is loaded
+        self._drawAxisArrows(self.ax_xz, 'xz', None)
+        self.canvas_xz.draw()
         viewers_splitter.addWidget(self.canvas_xz)
         # Connect mouse wheel event for Y slice control
         self.canvas_xz.mpl_connect('scroll_event', self.onScrollXZ)
 
         # YZ view (right)
         self.figure_yz = Figure(figsize=(4, 4), facecolor='#f5f5f5')
+        # Add extra space on left and bottom for axis arrows
+        self.figure_yz.subplots_adjust(left=0.25, right=0.95, bottom=0.15, top=0.95)
         self.canvas_yz = FigureCanvas(self.figure_yz)
         self.ax_yz = self.figure_yz.add_subplot(111)
         self.ax_yz.set_title('YZ Plane (X slice)', fontsize=10, fontweight='bold')
         self.ax_yz.set_aspect('equal')
         self.ax_yz.axis('off')
+        # Draw axis arrows even before image is loaded
+        self._drawAxisArrows(self.ax_yz, 'yz', None)
+        self.canvas_yz.draw()
         viewers_splitter.addWidget(self.canvas_yz)
         # Connect mouse wheel event for X slice control
         self.canvas_yz.mpl_connect('scroll_event', self.onScrollYZ)
@@ -1297,6 +1313,8 @@ class Viewer2D(QWidget):
             elif event.button == 'down':
                 self.slice_z = max(self.slice_z - 1, 0)
             self.renderSlicesOnly()
+            # Update main window slider if it exists
+            self._updateMainWindowSliders()
 
     def onScrollXZ(self, event):
         """Handle mouse wheel scroll on XZ view to change Y slice or zoom"""
@@ -1319,6 +1337,8 @@ class Viewer2D(QWidget):
             elif event.button == 'down':
                 self.slice_y = max(self.slice_y - 1, 0)
             self.renderSlicesOnly()
+            # Update main window slider if it exists
+            self._updateMainWindowSliders()
 
     def onScrollYZ(self, event):
         """Handle mouse wheel scroll on YZ view to change X slice or zoom"""
@@ -1341,6 +1361,8 @@ class Viewer2D(QWidget):
             elif event.button == 'down':
                 self.slice_x = max(self.slice_x - 1, 0)
             self.renderSlicesOnly()
+            # Update main window slider if it exists
+            self._updateMainWindowSliders()
 
     def updateHistogramDisplay(self):
         """Update histogram display based on selected graph type"""
@@ -1958,6 +1980,157 @@ class Viewer2D(QWidget):
         self.ax_yz.set_ylim([ylim[0] + dy, ylim[1] + dy])
         self.canvas_yz.draw_idle()
 
+    def _setSquareAspect(self, ax, slice_shape):
+        """Force axes to display as square regardless of image aspect ratio
+
+        Args:
+            ax: Matplotlib axis
+            slice_shape: Shape of the slice (height, width)
+        """
+        if slice_shape is None or len(slice_shape) < 2:
+            return
+
+        height, width = slice_shape
+        max_dim = max(height, width)
+
+        # Center the image and make the view square
+        x_center = width / 2
+        y_center = height / 2
+        half_size = max_dim / 2
+
+        ax.set_xlim(x_center - half_size, x_center + half_size)
+        ax.set_ylim(y_center - half_size, y_center + half_size)
+        ax.set_aspect('equal')
+
+    def _drawAxisArrows(self, ax, plane_type, slice_shape):
+        """Draw short axis arrows OUTSIDE the image area in the margin
+
+        Args:
+            ax: Matplotlib axis to draw on
+            plane_type: 'xy', 'xz', or 'yz'
+            slice_shape: Shape of the slice (height, width) - not used
+        """
+        from matplotlib.patches import FancyArrow
+
+        # Define colors: X=red, Y=green, Z=blue
+        colors = {'x': '#FF0000', 'y': '#00FF00', 'z': '#0000FF'}
+
+        # Position OUTSIDE the axes (negative coordinates = outside image area!)
+        # These coordinates are in axes fraction, where (0,0)-(1,1) is the image area
+        # Position on LEFT side to avoid histogram below
+        start_x = -0.12  # OUTSIDE - 12% left of image edge
+        start_y = 0.02   # Just inside bottom edge (to avoid histogram)
+        arrow_length = 0.08  # 8% of axes size
+
+        # Arrow appearance
+        arrow_width = 0.01   # width of arrow shaft
+        head_width = 0.03    # width of arrow head (3x shaft)
+        head_length = 0.02   # length of arrow head
+
+        if plane_type == 'xy':
+            # XY plane: show X (horizontal, red) and Y (vertical, green)
+            # X axis arrow - horizontal, OUTSIDE image
+            arrow_x = FancyArrow(start_x, start_y, arrow_length, 0,
+                                width=arrow_width, head_width=head_width,
+                                head_length=head_length,
+                                transform=ax.transAxes, color=colors['x'],
+                                clip_on=False, zorder=1000)
+            ax.add_patch(arrow_x)
+            ax.text(start_x + arrow_length + 0.01, start_y, 'X',
+                   transform=ax.transAxes,
+                   color=colors['x'], fontsize=10, fontweight='bold',
+                   ha='left', va='center', clip_on=False)
+
+            # Y axis arrow - vertical, OUTSIDE image
+            arrow_y = FancyArrow(start_x, start_y, 0, arrow_length,
+                                width=arrow_width, head_width=head_width,
+                                head_length=head_length,
+                                transform=ax.transAxes, color=colors['y'],
+                                clip_on=False, zorder=1000)
+            ax.add_patch(arrow_y)
+            ax.text(start_x, start_y + arrow_length + 0.01, 'Y',
+                   transform=ax.transAxes,
+                   color=colors['y'], fontsize=10, fontweight='bold',
+                   ha='center', va='bottom', clip_on=False)
+
+        elif plane_type == 'xz':
+            # XZ plane: show X (horizontal, red) and Z (vertical, blue)
+            # X axis arrow - horizontal, OUTSIDE image
+            arrow_x = FancyArrow(start_x, start_y, arrow_length, 0,
+                                width=arrow_width, head_width=head_width,
+                                head_length=head_length,
+                                transform=ax.transAxes, color=colors['x'],
+                                clip_on=False, zorder=1000)
+            ax.add_patch(arrow_x)
+            ax.text(start_x + arrow_length + 0.01, start_y, 'X',
+                   transform=ax.transAxes,
+                   color=colors['x'], fontsize=10, fontweight='bold',
+                   ha='left', va='center', clip_on=False)
+
+            # Z axis arrow - vertical, OUTSIDE image
+            arrow_z = FancyArrow(start_x, start_y, 0, arrow_length,
+                                width=arrow_width, head_width=head_width,
+                                head_length=head_length,
+                                transform=ax.transAxes, color=colors['z'],
+                                clip_on=False, zorder=1000)
+            ax.add_patch(arrow_z)
+            ax.text(start_x, start_y + arrow_length + 0.01, 'Z',
+                   transform=ax.transAxes,
+                   color=colors['z'], fontsize=10, fontweight='bold',
+                   ha='center', va='bottom', clip_on=False)
+
+        elif plane_type == 'yz':
+            # YZ plane: show Y (horizontal, green) and Z (vertical, blue)
+            # Y axis arrow - horizontal, OUTSIDE image
+            arrow_y = FancyArrow(start_x, start_y, arrow_length, 0,
+                                width=arrow_width, head_width=head_width,
+                                head_length=head_length,
+                                transform=ax.transAxes, color=colors['y'],
+                                clip_on=False, zorder=1000)
+            ax.add_patch(arrow_y)
+            ax.text(start_x + arrow_length + 0.01, start_y, 'Y',
+                   transform=ax.transAxes,
+                   color=colors['y'], fontsize=10, fontweight='bold',
+                   ha='left', va='center', clip_on=False)
+
+            # Z axis arrow - vertical, OUTSIDE image
+            arrow_z = FancyArrow(start_x, start_y, 0, arrow_length,
+                                width=arrow_width, head_width=head_width,
+                                head_length=head_length,
+                                transform=ax.transAxes, color=colors['z'],
+                                clip_on=False, zorder=1000)
+            ax.add_patch(arrow_z)
+            ax.text(start_x, start_y + arrow_length + 0.01, 'Z',
+                   transform=ax.transAxes,
+                   color=colors['z'], fontsize=10, fontweight='bold',
+                   ha='center', va='bottom', clip_on=False)
+
+    def _updateMainWindowSliders(self):
+        """Update main window sliders to match current slice positions from mouse scroll"""
+        if self.parent_window is None:
+            return
+
+        # Temporarily disconnect signals to avoid triggering updateSlices
+        try:
+            self.parent_window.x_slice_slider.valueChanged.disconnect()
+            self.parent_window.y_slice_slider.valueChanged.disconnect()
+            self.parent_window.z_slice_slider.valueChanged.disconnect()
+        except:
+            pass  # Signals may not be connected yet
+
+        # Update slider and spin box values
+        self.parent_window.x_slice_slider.setValue(self.slice_x)
+        self.parent_window.x_slice_spin.setValue(self.slice_x)
+        self.parent_window.y_slice_slider.setValue(self.slice_y)
+        self.parent_window.y_slice_spin.setValue(self.slice_y)
+        self.parent_window.z_slice_slider.setValue(self.slice_z)
+        self.parent_window.z_slice_spin.setValue(self.slice_z)
+
+        # Reconnect signals
+        self.parent_window.x_slice_slider.valueChanged.connect(self.parent_window.updateSlices)
+        self.parent_window.y_slice_slider.valueChanged.connect(self.parent_window.updateSlices)
+        self.parent_window.z_slice_slider.valueChanged.connect(self.parent_window.updateSlices)
+
     def renderSlicesOnly(self):
         """Fast rendering - only update slice views without histograms"""
         if self.current_volume is None:
@@ -1976,24 +2149,33 @@ class Viewer2D(QWidget):
         slice_xy = volume[self.slice_z, :, :]
         self.ax_xy.imshow(slice_xy, cmap=self.colormap, origin='lower',
                          vmin=vmin, vmax=vmax, aspect='equal')
+        self._setSquareAspect(self.ax_xy, slice_xy.shape)
         self.ax_xy.set_title(f'XY Plane (Z={self.slice_z})', fontsize=10, fontweight='bold')
         self.ax_xy.axis('off')
+        # Draw axis arrows
+        self._drawAxisArrows(self.ax_xy, 'xy', slice_xy.shape)
 
         # Clear and render XZ plane
         self.ax_xz.clear()
         slice_xz = volume[:, self.slice_y, :]
         self.ax_xz.imshow(slice_xz, cmap=self.colormap, origin='lower',
                          vmin=vmin, vmax=vmax, aspect='equal')
+        self._setSquareAspect(self.ax_xz, slice_xz.shape)
         self.ax_xz.set_title(f'XZ Plane (Y={self.slice_y})', fontsize=10, fontweight='bold')
         self.ax_xz.axis('off')
+        # Draw axis arrows
+        self._drawAxisArrows(self.ax_xz, 'xz', slice_xz.shape)
 
         # Clear and render YZ plane
         self.ax_yz.clear()
         slice_yz = volume[:, :, self.slice_x]
         self.ax_yz.imshow(slice_yz, cmap=self.colormap, origin='lower',
                          vmin=vmin, vmax=vmax, aspect='equal')
+        self._setSquareAspect(self.ax_yz, slice_yz.shape)
         self.ax_yz.set_title(f'YZ Plane (X={self.slice_x})', fontsize=10, fontweight='bold')
         self.ax_yz.axis('off')
+        # Draw axis arrows
+        self._drawAxisArrows(self.ax_yz, 'yz', slice_yz.shape)
 
         # Add void overlay only within ROIs
         self._renderVoidOverlay()
@@ -2072,24 +2254,33 @@ class Viewer2D(QWidget):
             slice_xy = volume[self.slice_z, :, :]
             im_xy = self.ax_xy.imshow(slice_xy, cmap=self.colormap, origin='lower',
                                        vmin=vmin, vmax=vmax, aspect='equal')
+            self._setSquareAspect(self.ax_xy, slice_xy.shape)
             self.ax_xy.set_title(f'XY Plane (Z={self.slice_z})', fontsize=10, fontweight='bold')
             self.ax_xy.axis('off')
+            # Draw axis arrows
+            self._drawAxisArrows(self.ax_xy, 'xy', slice_xy.shape)
             self.figure_xy.tight_layout()
 
             # Render XZ plane (Y slice)
             slice_xz = volume[:, self.slice_y, :]
             im_xz = self.ax_xz.imshow(slice_xz, cmap=self.colormap, origin='lower',
                                        vmin=vmin, vmax=vmax, aspect='equal')
+            self._setSquareAspect(self.ax_xz, slice_xz.shape)
             self.ax_xz.set_title(f'XZ Plane (Y={self.slice_y})', fontsize=10, fontweight='bold')
             self.ax_xz.axis('off')
+            # Draw axis arrows
+            self._drawAxisArrows(self.ax_xz, 'xz', slice_xz.shape)
             self.figure_xz.tight_layout()
 
             # Render YZ plane (X slice)
             slice_yz = volume[:, :, self.slice_x]
             im_yz = self.ax_yz.imshow(slice_yz, cmap=self.colormap, origin='lower',
                                        vmin=vmin, vmax=vmax, aspect='equal')
+            self._setSquareAspect(self.ax_yz, slice_yz.shape)
             self.ax_yz.set_title(f'YZ Plane (X={self.slice_x})', fontsize=10, fontweight='bold')
             self.ax_yz.axis('off')
+            # Draw axis arrows
+            self._drawAxisArrows(self.ax_yz, 'yz', slice_yz.shape)
             self.figure_yz.tight_layout()
 
             # Add void overlay only within ROIs
@@ -2324,7 +2515,8 @@ class Viewer2D(QWidget):
         self.slice_x = x
         self.slice_y = y
         self.slice_z = z
-        self.renderVolume()
+        # Use fast slice-only rendering for responsive slider updates
+        self.renderSlicesOnly()
 
     def updateSlices(self, x, y, z):
         """Alias for updateSlicePositions for compatibility"""
@@ -2409,10 +2601,6 @@ class VisualizationTab(QWidget):
         self.open_btn.clicked.connect(self.openImportDialog)
         file_layout.addWidget(self.open_btn)
 
-        self.test_btn = RibbonButton("Load\nTest Data")
-        self.test_btn.clicked.connect(self.loadTestData)
-        file_layout.addWidget(self.test_btn)
-
         toolbar_layout.addWidget(file_group)
 
         # Render Mode Group removed - 2D viewer always shows slices
@@ -2494,50 +2682,6 @@ class VisualizationTab(QWidget):
         """Compatibility method - no render modes in 2D viewer"""
         pass
 
-    def loadTestData(self):
-        """Load synthetic test data with distinctive patterns for testing slice controls"""
-        import numpy as np
-
-        print("Generating test volume with stripe patterns...")
-
-        # Create test volume with distinctive patterns
-        volume = np.ones((100, 100, 100), dtype=np.uint8) * 50  # Base gray
-
-        # Add vertical stripes along X axis (will appear in YZ view)
-        for x in range(0, 100, 10):
-            volume[:, :, x:x+4] = 220
-
-        # Add horizontal stripes along Y axis (will appear in XZ view)
-        for y in range(0, 100, 10):
-            volume[:, y:y+4, :] = 180
-
-        # Add depth stripes along Z axis (will appear in XY view)
-        for z in range(0, 100, 10):
-            volume[z:z+4, :, :] = 130
-
-        # Add some spheres for interest
-        for center in [(30, 30, 30), (70, 70, 70), (50, 50, 50)]:
-            z_grid, y_grid, x_grid = np.ogrid[:100, :100, :100]
-            distance = np.sqrt((z_grid - center[0])**2 + (y_grid - center[1])**2 + (x_grid - center[2])**2)
-            volume[distance < 10] = 255
-
-        # Load it as if it were imported
-        self.onVolumeImported(volume)
-
-        # Show info message
-        QMessageBox.information(
-            self,
-            "Test Data Loaded",
-            "Test volume loaded successfully!\n\n"
-            "The volume contains:\n"
-            "• Vertical stripes (visible in YZ plane)\n"
-            "• Horizontal stripes (visible in XZ plane)\n"
-            "• Depth stripes (visible in XY plane)\n"
-            "• Three spheres at different positions\n\n"
-            "Try moving the X, Y, and Z sliders to see\n"
-            "how each controls a different slice plane!"
-        )
-
     def updateColormap(self):
         if self.viewer:
             colormap = self.colormap_combo.currentText()
@@ -2582,12 +2726,8 @@ class VisualizationTab(QWidget):
                     # Default to .vtk if no supported extension
                     filename += '.vtk'
 
-                # Get iso value from main window
-                main_window = self.parent()
-                while main_window and not hasattr(main_window, 'iso_spin'):
-                    main_window = main_window.parent()
-
-                iso_value = main_window.iso_spin.value() if main_window else 128
+                # Use default iso value for 3D export (mean of volume)
+                iso_value = np.mean(self.viewer.current_volume) if self.viewer.current_volume is not None else 128
                 self.viewer.export3D(filename, iso_value)
 
 # Volume info setting removed - now handled by main window
@@ -2649,8 +2789,8 @@ class AnalysisTab(QWidget):
         ref_layout = QVBoxLayout(ref_group)
 
         self.ref_combo = QComboBox()
-        self.ref_combo.addItems(["X-axis", "Y-axis", "Z-axis"])
-        self.ref_combo.setCurrentText("X-axis")  # Default to X-axis
+        self.ref_combo.addItems(["Z-axis", "Y-axis", "X-axis"])
+        self.ref_combo.setCurrentText("X-axis")  # Default to X-axis (depth direction)
         self.ref_combo.setStyleSheet("""
             QComboBox {
                 padding: 4px;
@@ -2799,11 +2939,11 @@ class AnalysisTab(QWidget):
                 # Get selected reference vector
                 ref_text = self.ref_combo.currentText()
                 if ref_text == "X-axis":
-                    reference_vector = [1, 0, 0]  # X-axis
+                    reference_vector = [0, 0, 1]  # X-axis (depth direction in volume)
                 elif ref_text == "Y-axis":
                     reference_vector = [0, 1, 0]  # Y-axis
                 else:  # "Z-axis"
-                    reference_vector = [0, 0, 1]  # Z-axis
+                    reference_vector = [1, 0, 0]  # Z-axis
 
                 # Compute reference orientation using proper ACSC method
                 reference_orientation = compute_orientation(structure_tensor, reference_vector)
@@ -2826,6 +2966,10 @@ class AnalysisTab(QWidget):
                 # Enable edit range and histogram buttons
                 self.edit_range_btn.setEnabled(True)
                 self.histogram_btn.setEnabled(True)
+
+                # Enable histogram button in Simulation tab as well
+                if hasattr(main_window, 'simulation_tab'):
+                    main_window.simulation_tab.histogram_btn.setEnabled(True)
 
                 # Store orientation data in the ROI structure
                 if roi_name in main_window.viewer.rois:
@@ -3268,10 +3412,374 @@ class ColorBarRangeDialog(QDialog):
         self.orientation_auto_check.setChecked(True)
         self.loadCurrentRanges()
 
+
+class ExportDialog(QDialog):
+    """Dialog for exporting simulation results to Excel"""
+    def __init__(self, parent=None, simulation_data=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export to Excel")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        self.simulation_data = simulation_data or []
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Data Selection Group
+        data_group = QGroupBox("Select Data to Export")
+        data_layout = QVBoxLayout(data_group)
+
+        self.export_ss_curve = QCheckBox("Stress-Strain Curves")
+        self.export_ss_curve.setChecked(True)
+        data_layout.addWidget(self.export_ss_curve)
+
+        self.export_results = QCheckBox("Results Summary (Strength, Strain)")
+        self.export_results.setChecked(True)
+        data_layout.addWidget(self.export_results)
+
+        self.export_params = QCheckBox("Material Parameters")
+        self.export_params.setChecked(True)
+        data_layout.addWidget(self.export_params)
+
+        layout.addWidget(data_group)
+
+        # Case Selection Group
+        case_group = QGroupBox("Select Cases to Export")
+        case_layout = QVBoxLayout(case_group)
+
+        self.case_checkboxes = []
+        if self.simulation_data:
+            for i, data in enumerate(self.simulation_data):
+                case_name = data.get('case_name', f'Case {i+1}')
+                checkbox = QCheckBox(case_name)
+                checkbox.setChecked(True)
+                self.case_checkboxes.append(checkbox)
+                case_layout.addWidget(checkbox)
+        else:
+            no_data_label = QLabel("No simulation data available")
+            no_data_label.setStyleSheet("color: gray; font-style: italic;")
+            case_layout.addWidget(no_data_label)
+
+        # Select All / Deselect All buttons
+        if self.simulation_data:
+            btn_layout = QHBoxLayout()
+            select_all_btn = QPushButton("Select All")
+            select_all_btn.clicked.connect(self.selectAllCases)
+            btn_layout.addWidget(select_all_btn)
+
+            deselect_all_btn = QPushButton("Deselect All")
+            deselect_all_btn.clicked.connect(self.deselectAllCases)
+            btn_layout.addWidget(deselect_all_btn)
+            btn_layout.addStretch()
+            case_layout.addLayout(btn_layout)
+
+        layout.addWidget(case_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
+
+        self.export_btn = QPushButton("Export...")
+        self.export_btn.clicked.connect(self.doExport)
+        self.export_btn.setEnabled(bool(self.simulation_data))
+        self.export_btn.setDefault(True)
+        button_layout.addWidget(self.export_btn)
+
+        layout.addLayout(button_layout)
+
+    def selectAllCases(self):
+        for cb in self.case_checkboxes:
+            cb.setChecked(True)
+
+    def deselectAllCases(self):
+        for cb in self.case_checkboxes:
+            cb.setChecked(False)
+
+    def doExport(self):
+        """Export data to Excel file"""
+        # Get selected cases
+        selected_indices = [i for i, cb in enumerate(self.case_checkboxes) if cb.isChecked()]
+        if not selected_indices:
+            QMessageBox.warning(self, "No Cases Selected", "Please select at least one case to export.")
+            return
+
+        # Open file dialog
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Excel File", "", "Excel Files (*.xlsx);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        if not file_path.endswith('.xlsx'):
+            file_path += '.xlsx'
+
+        try:
+            import pandas as pd
+
+            with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+                # Export Results Summary
+                if self.export_results.isChecked():
+                    results_data = []
+                    for i in selected_indices:
+                        data = self.simulation_data[i]
+                        results_data.append({
+                            'Case Name': data.get('case_name', f'Case {i+1}'),
+                            'Compressive Strength (MPa)': data.get('strength', 0),
+                            'Ultimate Strain': data.get('strain', 0),
+                            'Mode': data.get('mode', 'N/A')
+                        })
+                    df_results = pd.DataFrame(results_data)
+                    df_results.to_excel(writer, sheet_name='Results', index=False)
+
+                # Export Material Parameters
+                if self.export_params.isChecked():
+                    params_data = []
+                    for i in selected_indices:
+                        data = self.simulation_data[i]
+                        params = data.get('material_params', {})
+                        settings = data.get('settings', {})
+                        params_data.append({
+                            'Case Name': data.get('case_name', f'Case {i+1}'),
+                            # Material Parameters
+                            'E1 (MPa)': params.get('E1', 0),
+                            'E2 (MPa)': params.get('E2', 0),
+                            'Poisson Ratio': params.get('nu', 0),
+                            'G (MPa)': params.get('G', 0),
+                            'tau_y (MPa)': params.get('tau_y', 0),
+                            'K': params.get('K', 0),
+                            'n': params.get('n', 0),
+                            # Fiber Orientation
+                            'Initial Misalignment (°)': params.get('initial_misalignment', 'N/A'),
+                            'Std Deviation (°)': params.get('std_deviation', 'N/A'),
+                            # Simulation Settings
+                            'Max Shear Stress (MPa)': settings.get('maximum_shear_stress', 'N/A'),
+                            'Shear Stress Step (MPa)': settings.get('shear_stress_step_size', 'N/A'),
+                            'Max Axial Strain': settings.get('maximum_axial_strain', 'N/A'),
+                            'Max Fiber Misalignment (°)': settings.get('maximum_fiber_misalignment', 'N/A'),
+                            'Fiber Misalignment Step (°)': settings.get('fiber_misalignment_step_size', 'N/A'),
+                            # Strain Correction
+                            'Kink Width (mm)': settings.get('kink_width') if settings.get('kink_width') is not None else 'N/A',
+                            'Gauge Length (mm)': settings.get('gauge_length') if settings.get('gauge_length') is not None else 'N/A'
+                        })
+                    df_params = pd.DataFrame(params_data)
+                    df_params.to_excel(writer, sheet_name='Parameters', index=False)
+
+                # Export Stress-Strain Curves
+                if self.export_ss_curve.isChecked():
+                    ss_data = {}
+                    max_len = 0
+                    for i in selected_indices:
+                        data = self.simulation_data[i]
+                        case_name = data.get('case_name', f'Case {i+1}')
+                        strain_array = data.get('strain_array', [])
+                        stress_array = data.get('stress_array', [])
+                        ss_data[f'{case_name}_Strain'] = strain_array
+                        ss_data[f'{case_name}_Stress(MPa)'] = stress_array
+                        max_len = max(max_len, len(strain_array))
+
+                    # Pad shorter arrays with NaN
+                    import numpy as np
+                    for key in ss_data:
+                        arr = ss_data[key]
+                        if len(arr) < max_len:
+                            ss_data[key] = np.pad(arr, (0, max_len - len(arr)),
+                                                   mode='constant', constant_values=np.nan)
+
+                    df_ss = pd.DataFrame(ss_data)
+                    df_ss.to_excel(writer, sheet_name='Stress-Strain', index=False)
+
+            QMessageBox.information(self, "Export Complete", f"Data exported successfully to:\n{file_path}")
+            self.accept()
+
+        except ImportError:
+            QMessageBox.critical(self, "Error", "pandas and openpyxl are required for Excel export.\nInstall with: pip install pandas openpyxl")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export data:\n{str(e)}")
+
+
+class SimulationSettingsDialog(QDialog):
+    """Dialog for advanced simulation settings"""
+    def __init__(self, parent=None, settings=None):
+        super().__init__(parent)
+        self.setWindowTitle("Simulation Settings")
+        self.setModal(True)
+        self.setMinimumWidth(350)
+
+        # Default settings
+        self.settings = settings or {
+            'maximum_shear_stress': 100.0,
+            'shear_stress_step_size': 0.1,
+            'maximum_axial_strain': 0.02,
+            'maximum_fiber_misalignment': 20.0,
+            'fiber_misalignment_step_size': 0.1,
+            'kink_width': None,
+            'gauge_length': None
+        }
+
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Shear Stress Group
+        shear_group = QGroupBox("Shear Stress Parameters")
+        shear_layout = QFormLayout(shear_group)
+
+        self.max_shear_spin = QDoubleSpinBox()
+        self.max_shear_spin.setRange(10, 500)
+        self.max_shear_spin.setValue(self.settings['maximum_shear_stress'])
+        self.max_shear_spin.setSuffix(" MPa")
+        self.max_shear_spin.setDecimals(1)
+        shear_layout.addRow("Maximum Shear Stress:", self.max_shear_spin)
+
+        self.shear_step_spin = QDoubleSpinBox()
+        self.shear_step_spin.setRange(0.01, 1.0)
+        self.shear_step_spin.setValue(self.settings['shear_stress_step_size'])
+        self.shear_step_spin.setSuffix(" MPa")
+        self.shear_step_spin.setDecimals(2)
+        self.shear_step_spin.setSingleStep(0.01)
+        shear_layout.addRow("Step Size:", self.shear_step_spin)
+
+        layout.addWidget(shear_group)
+
+        # Axial Strain Group
+        strain_group = QGroupBox("Axial Strain Parameters")
+        strain_layout = QFormLayout(strain_group)
+
+        self.max_strain_spin = QDoubleSpinBox()
+        self.max_strain_spin.setRange(0.001, 0.1)
+        self.max_strain_spin.setValue(self.settings['maximum_axial_strain'])
+        self.max_strain_spin.setDecimals(4)
+        self.max_strain_spin.setSingleStep(0.001)
+        strain_layout.addRow("Maximum Axial Strain:", self.max_strain_spin)
+
+        layout.addWidget(strain_group)
+
+        # Fiber Misalignment Group
+        misalign_group = QGroupBox("Fiber Misalignment Parameters")
+        misalign_layout = QFormLayout(misalign_group)
+
+        self.max_misalign_spin = QDoubleSpinBox()
+        self.max_misalign_spin.setRange(5, 90)
+        self.max_misalign_spin.setValue(self.settings['maximum_fiber_misalignment'])
+        self.max_misalign_spin.setSuffix(" °")
+        self.max_misalign_spin.setDecimals(1)
+        misalign_layout.addRow("Maximum Misalignment:", self.max_misalign_spin)
+
+        self.misalign_step_spin = QDoubleSpinBox()
+        self.misalign_step_spin.setRange(0.01, 1.0)
+        self.misalign_step_spin.setValue(self.settings['fiber_misalignment_step_size'])
+        self.misalign_step_spin.setSuffix(" °")
+        self.misalign_step_spin.setDecimals(2)
+        self.misalign_step_spin.setSingleStep(0.01)
+        misalign_layout.addRow("Step Size:", self.misalign_step_spin)
+
+        layout.addWidget(misalign_group)
+
+        # Strain Correction Group (Kink Width / Gauge Length)
+        correction_group = QGroupBox("Strain Correction (Optional)")
+        correction_layout = QFormLayout(correction_group)
+
+        self.use_correction_check = QCheckBox("Enable strain correction")
+        self.use_correction_check.setChecked(self.settings.get('kink_width') is not None)
+        self.use_correction_check.stateChanged.connect(self.onCorrectionToggled)
+        correction_layout.addRow(self.use_correction_check)
+
+        self.kink_width_spin = QDoubleSpinBox()
+        self.kink_width_spin.setRange(0.001, 100)
+        self.kink_width_spin.setValue(self.settings.get('kink_width') or 0.5)
+        self.kink_width_spin.setSuffix(" mm")
+        self.kink_width_spin.setDecimals(3)
+        self.kink_width_spin.setSingleStep(0.1)
+        correction_layout.addRow("Kink Width (w_k):", self.kink_width_spin)
+
+        self.gauge_length_spin = QDoubleSpinBox()
+        self.gauge_length_spin.setRange(0.1, 1000)
+        self.gauge_length_spin.setValue(self.settings.get('gauge_length') or 10.0)
+        self.gauge_length_spin.setSuffix(" mm")
+        self.gauge_length_spin.setDecimals(2)
+        self.gauge_length_spin.setSingleStep(1.0)
+        correction_layout.addRow("Gauge Length (L_g):", self.gauge_length_spin)
+
+        # Set initial enabled state based on checkbox
+        is_checked = self.use_correction_check.isChecked()
+        self.kink_width_spin.setEnabled(is_checked)
+        self.gauge_length_spin.setEnabled(is_checked)
+
+        layout.addWidget(correction_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.reset_btn = QPushButton("Reset to Defaults")
+        self.reset_btn.clicked.connect(self.resetToDefaults)
+        button_layout.addWidget(self.reset_btn)
+        button_layout.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
+
+        self.ok_btn = QPushButton("OK")
+        self.ok_btn.clicked.connect(self.accept)
+        self.ok_btn.setDefault(True)
+        button_layout.addWidget(self.ok_btn)
+
+        layout.addLayout(button_layout)
+
+    def onCorrectionToggled(self, state):
+        """Toggle strain correction inputs"""
+        enabled = (state == Qt.Checked.value) if hasattr(Qt.Checked, 'value') else (state == 2)
+        self.kink_width_spin.setEnabled(enabled)
+        self.gauge_length_spin.setEnabled(enabled)
+
+    def resetToDefaults(self):
+        """Reset all values to defaults"""
+        self.max_shear_spin.setValue(100.0)
+        self.shear_step_spin.setValue(0.1)
+        self.max_strain_spin.setValue(0.02)
+        self.max_misalign_spin.setValue(20.0)
+        self.misalign_step_spin.setValue(0.1)
+        self.use_correction_check.setChecked(False)
+        self.kink_width_spin.setValue(0.5)
+        self.gauge_length_spin.setValue(10.0)
+
+    def getSettings(self):
+        """Return current settings"""
+        use_correction = self.use_correction_check.isChecked()
+        return {
+            'maximum_shear_stress': self.max_shear_spin.value(),
+            'shear_stress_step_size': self.shear_step_spin.value(),
+            'maximum_axial_strain': self.max_strain_spin.value(),
+            'maximum_fiber_misalignment': self.max_misalign_spin.value(),
+            'fiber_misalignment_step_size': self.misalign_step_spin.value(),
+            'kink_width': self.kink_width_spin.value() if use_correction else None,
+            'gauge_length': self.gauge_length_spin.value() if use_correction else None
+        }
+
+
 class SimulationTab(QWidget):
+    """Toolbar portion of Simulation tab (displayed in tab area)"""
     def __init__(self, viewer=None):
         super().__init__()
         self.viewer = viewer
+        self.main_window = None
+        # Store simulation settings
+        self.simulation_settings = {
+            'maximum_shear_stress': 100.0,
+            'shear_stress_step_size': 0.1,
+            'maximum_axial_strain': 0.02,
+            'maximum_fiber_misalignment': 20.0,
+            'fiber_misalignment_step_size': 0.1,
+            'kink_width': None,
+            'gauge_length': None
+        }
+        # Store simulation results for export
+        self.simulation_results = []
         self.initUI()
 
     def initUI(self):
@@ -3284,11 +3792,55 @@ class SimulationTab(QWidget):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setSpacing(10)
 
-        # Simulation placeholder text
-        placeholder_label = QLabel("Simulation controls will be added here")
-        placeholder_label.setStyleSheet("QLabel { color: #666; font-size: 14px; padding: 20px; }")
-        placeholder_label.setAlignment(Qt.AlignCenter)
-        toolbar_layout.addWidget(placeholder_label)
+        # Simulation Group
+        sim_group = QGroupBox("Simulation")
+        sim_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        sim_layout = QHBoxLayout(sim_group)
+
+        self.run_btn = RibbonButton("Run\nSimulation")
+        self.run_btn.clicked.connect(self.runSimulation)
+        sim_layout.addWidget(self.run_btn)
+
+        self.clear_btn = RibbonButton("Clear\nGraph")
+        self.clear_btn.clicked.connect(self.clearGraph)
+        sim_layout.addWidget(self.clear_btn)
+
+        toolbar_layout.addWidget(sim_group)
+
+        # Analysis Group (Histogram)
+        analysis_group = QGroupBox("Analysis")
+        analysis_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        analysis_layout = QVBoxLayout(analysis_group)
+
+        self.histogram_btn = RibbonButton("Histogram")
+        self.histogram_btn.clicked.connect(self.openHistogramDialog)
+        self.histogram_btn.setEnabled(False)  # Enable after orientation data is available
+        analysis_layout.addWidget(self.histogram_btn)
+
+        toolbar_layout.addWidget(analysis_group)
+
+        # Settings Group
+        settings_group = QGroupBox("Settings")
+        settings_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        settings_layout = QVBoxLayout(settings_group)
+
+        self.settings_btn = RibbonButton("Settings")
+        self.settings_btn.clicked.connect(self.openSettingsDialog)
+        settings_layout.addWidget(self.settings_btn)
+
+        toolbar_layout.addWidget(settings_group)
+
+        # Export Group
+        export_group = QGroupBox("Export")
+        export_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        export_layout = QVBoxLayout(export_group)
+
+        self.export_btn = RibbonButton("Export\nXLSX")
+        self.export_btn.clicked.connect(self.openExportDialog)
+        export_layout.addWidget(self.export_btn)
+
+        toolbar_layout.addWidget(export_group)
+        toolbar_layout.addStretch()
 
         layout.addWidget(toolbar)
         layout.addStretch()
@@ -3296,6 +3848,459 @@ class SimulationTab(QWidget):
     def setViewer(self, viewer):
         """Set the viewer reference (for future use)"""
         self.viewer = viewer
+
+    def setMainWindow(self, main_window):
+        """Set the main window reference"""
+        self.main_window = main_window
+
+    def openHistogramDialog(self):
+        """Open histogram configuration dialog"""
+        if not self.main_window:
+            return
+
+        # Get analysis tab for orientation data
+        analysis_tab = self.main_window.analysis_tab
+
+        # Create and show histogram dialog
+        dialog = HistogramDialog(self.main_window, analysis_tab)
+        if dialog.exec() == QDialog.Accepted:
+            # Show histogram panel in Simulation content panel
+            config = dialog.getConfiguration()
+            sim_content = self.main_window.simulation_content
+            sim_content.histogram_panel.setVisible(True)
+            # Pass viewer.rois if ROIs are selected, otherwise pass orientation_data
+            if config.get('rois'):
+                sim_content.histogram_panel.plotHistogramMultiROI(config, self.main_window.viewer.rois)
+            else:
+                sim_content.histogram_panel.plotHistogram(config, self.main_window.orientation_data)
+
+    def openSettingsDialog(self):
+        """Open simulation settings dialog"""
+        dialog = SimulationSettingsDialog(self, self.simulation_settings)
+        if dialog.exec() == QDialog.Accepted:
+            self.simulation_settings = dialog.getSettings()
+
+    def clearGraph(self):
+        """Clear the stress-strain graph and simulation results"""
+        if self.main_window:
+            self.main_window.simulation_content.clearGraph()
+            self.simulation_results.clear()
+            self.main_window.status_label.setText("Graph cleared")
+
+    def openExportDialog(self):
+        """Open export dialog"""
+        dialog = ExportDialog(self, self.simulation_results)
+        dialog.exec()
+
+    def runSimulation(self):
+        """Run compression strength simulation"""
+        if not self.main_window:
+            return
+
+        from acsc.simulation import estimate_compression_strength, estimate_compression_strength_from_profile, MaterialParams
+
+        sim_content = self.main_window.simulation_content
+
+        # Get material parameters from UI
+        material = MaterialParams(
+            longitudinal_modulus=sim_content.e1_spin.value(),
+            transverse_modulus=sim_content.e2_spin.value(),
+            poisson_ratio=sim_content.nu_spin.value(),
+            shear_modulus=sim_content.g_spin.value(),
+            tau_y=sim_content.tau_y_spin.value(),
+            K=sim_content.k_spin.value(),
+            n=sim_content.n_spin.value()
+        )
+
+        # Get simulation settings
+        settings = self.simulation_settings
+
+        # Check if using 3D orientation data
+        use_3d_orientation = sim_content.use_3d_orientation_check.isChecked()
+
+        self.main_window.status_label.setText("Running simulation...")
+        QApplication.processEvents()
+
+        try:
+            if use_3d_orientation:
+                # Use 3D orientation data from analysis
+                orientation_data = self.main_window.orientation_data
+                if orientation_data['reference'] is None:
+                    raise ValueError("No 3D orientation data available. Please run orientation analysis first.")
+
+                # Run simulation with measured orientation profile
+                strength, strain, stress_curve, strain_array = estimate_compression_strength_from_profile(
+                    orientation_profile=orientation_data['reference'],
+                    material_params=material,
+                    maximum_shear_stress=settings['maximum_shear_stress'],
+                    shear_stress_step_size=settings['shear_stress_step_size'],
+                    maximum_axial_strain=settings['maximum_axial_strain'],
+                    maximum_fiber_misalignment=settings['maximum_fiber_misalignment'],
+                    fiber_misalignment_step_size=settings['fiber_misalignment_step_size'],
+                    kink_width=settings.get('kink_width'),
+                    gauge_length=settings.get('gauge_length')
+                )
+            else:
+                # Use manual input with Gaussian distribution
+                initial_misalignment = sim_content.initial_misalignment_spin.value()
+                std_deviation = sim_content.std_deviation_spin.value()
+
+                strength, strain, stress_curve, strain_array = estimate_compression_strength(
+                    initial_misalignment=initial_misalignment,
+                    standard_deviation=std_deviation,
+                    material_params=material,
+                    maximum_shear_stress=settings['maximum_shear_stress'],
+                    shear_stress_step_size=settings['shear_stress_step_size'],
+                    maximum_axial_strain=settings['maximum_axial_strain'],
+                    maximum_fiber_misalignment=settings['maximum_fiber_misalignment'],
+                    fiber_misalignment_step_size=settings['fiber_misalignment_step_size'],
+                    kink_width=settings.get('kink_width'),
+                    gauge_length=settings.get('gauge_length')
+                )
+
+            # Update results
+            sim_content.updateResults(strength, strain)
+
+            # Get case name and plot stress-strain curve
+            case_name = sim_content.case_name_edit.text().strip()
+            if not case_name:
+                case_name = f"Case {len(sim_content.ax.lines) + 1}"
+            sim_content.plotStressStrain(strain_array, stress_curve, case_name)
+
+            mode = "3D data" if use_3d_orientation else "Gaussian"
+
+            # Store simulation result for export
+            result_data = {
+                'case_name': case_name,
+                'strength': strength,
+                'strain': strain,
+                'stress_array': stress_curve,
+                'strain_array': strain_array,
+                'mode': mode,
+                'material_params': {
+                    'E1': sim_content.e1_spin.value(),
+                    'E2': sim_content.e2_spin.value(),
+                    'nu': sim_content.nu_spin.value(),
+                    'G': sim_content.g_spin.value(),
+                    'tau_y': sim_content.tau_y_spin.value(),
+                    'K': sim_content.k_spin.value(),
+                    'n': sim_content.n_spin.value(),
+                    'initial_misalignment': sim_content.initial_misalignment_spin.value() if not use_3d_orientation else 'N/A',
+                    'std_deviation': sim_content.std_deviation_spin.value() if not use_3d_orientation else 'N/A'
+                },
+                'settings': {
+                    'maximum_shear_stress': settings['maximum_shear_stress'],
+                    'shear_stress_step_size': settings['shear_stress_step_size'],
+                    'maximum_axial_strain': settings['maximum_axial_strain'],
+                    'maximum_fiber_misalignment': settings['maximum_fiber_misalignment'],
+                    'fiber_misalignment_step_size': settings['fiber_misalignment_step_size'],
+                    'kink_width': settings.get('kink_width'),
+                    'gauge_length': settings.get('gauge_length')
+                }
+            }
+            self.simulation_results.append(result_data)
+
+            self.main_window.status_label.setText(
+                f"Simulation complete ({mode}): Strength = {strength:.2f} MPa, Strain = {strain:.4f}"
+            )
+
+        except ValueError as e:
+            self.main_window.status_label.setText(f"Simulation error: {str(e)}")
+            QMessageBox.warning(self.main_window, "Simulation Error", str(e))
+        except Exception as e:
+            self.main_window.status_label.setText(f"Simulation failed: {str(e)}")
+            QMessageBox.critical(self.main_window, "Error", f"Simulation failed:\n{str(e)}")
+
+
+class SimulationContentPanel(QWidget):
+    """Main content panel for Simulation (displayed below tabs)"""
+    def __init__(self):
+        super().__init__()
+        self.material_presets = {}
+        self.loadMaterialPresets()
+        self.initUI()
+
+    def loadMaterialPresets(self):
+        """Load material presets from JSON file"""
+        import json
+        preset_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'material_params.json')
+        try:
+            with open(preset_path, 'r') as f:
+                self.material_presets = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"Warning: Could not load material presets: {e}")
+            self.material_presets = {}
+
+    def initUI(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        # Left panel - Material Parameters
+        left_panel = QWidget()
+        left_panel.setMinimumWidth(280)
+        left_panel.setMaximumWidth(350)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
+
+        # Material Parameters Group
+        group_style = """
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #d0d0d0;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """
+
+        # Case Name Group
+        case_group = QGroupBox("Case")
+        case_group.setStyleSheet(group_style)
+        case_layout = QFormLayout(case_group)
+        case_layout.setSpacing(8)
+        case_layout.setContentsMargins(10, 20, 10, 10)
+
+        self.case_name_edit = QLineEdit()
+        self.case_name_edit.setPlaceholderText("Enter case name...")
+        self.case_name_edit.setText("Case 1")
+        case_layout.addRow("Name:", self.case_name_edit)
+
+        left_layout.addWidget(case_group)
+
+        material_group = QGroupBox("Material Parameters")
+        material_group.setStyleSheet(group_style)
+        material_layout = QFormLayout(material_group)
+        material_layout.setSpacing(8)
+        material_layout.setContentsMargins(10, 20, 10, 10)
+
+        # Preset Selection
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("Custom")
+        for name in self.material_presets.keys():
+            self.preset_combo.addItem(name)
+        self.preset_combo.currentTextChanged.connect(self.onPresetChanged)
+        material_layout.addRow("Preset:", self.preset_combo)
+
+        # Longitudinal Modulus (E1)
+        self.e1_spin = QDoubleSpinBox()
+        self.e1_spin.setRange(0, 500000)
+        self.e1_spin.setValue(0)
+        self.e1_spin.setSuffix(" MPa")
+        self.e1_spin.setDecimals(0)
+        material_layout.addRow("Longitudinal Modulus (E₁):", self.e1_spin)
+
+        # Transverse Modulus (E2)
+        self.e2_spin = QDoubleSpinBox()
+        self.e2_spin.setRange(0, 100000)
+        self.e2_spin.setValue(0)
+        self.e2_spin.setSuffix(" MPa")
+        self.e2_spin.setDecimals(0)
+        material_layout.addRow("Transverse Modulus (E₂):", self.e2_spin)
+
+        # Poisson's Ratio (nu)
+        self.nu_spin = QDoubleSpinBox()
+        self.nu_spin.setRange(0, 0.5)
+        self.nu_spin.setValue(0)
+        self.nu_spin.setDecimals(2)
+        self.nu_spin.setSingleStep(0.01)
+        material_layout.addRow("Poisson's Ratio (ν):", self.nu_spin)
+
+        # Shear Modulus (G)
+        self.g_spin = QDoubleSpinBox()
+        self.g_spin.setRange(0, 50000)
+        self.g_spin.setValue(0)
+        self.g_spin.setSuffix(" MPa")
+        self.g_spin.setDecimals(0)
+        material_layout.addRow("Shear Modulus (G):", self.g_spin)
+
+        left_layout.addWidget(material_group)
+
+        # Plasticity Parameters Group
+        plasticity_group = QGroupBox("Plasticity Parameters")
+        plasticity_group.setStyleSheet(group_style)
+        plasticity_layout = QFormLayout(plasticity_group)
+        plasticity_layout.setSpacing(8)
+        plasticity_layout.setContentsMargins(10, 20, 10, 10)
+
+        # Yield Stress (tau_y)
+        self.tau_y_spin = QDoubleSpinBox()
+        self.tau_y_spin.setRange(0, 500)
+        self.tau_y_spin.setValue(0)
+        self.tau_y_spin.setSuffix(" MPa")
+        self.tau_y_spin.setDecimals(1)
+        plasticity_layout.addRow("Yield Stress (τᵧ):", self.tau_y_spin)
+
+        # Hardening Coefficient (K)
+        self.k_spin = QDoubleSpinBox()
+        self.k_spin.setRange(0, 10)
+        self.k_spin.setValue(0)
+        self.k_spin.setDecimals(3)
+        self.k_spin.setSingleStep(0.01)
+        plasticity_layout.addRow("Hardening Coeff. (K):", self.k_spin)
+
+        # Hardening Exponent (n)
+        self.n_spin = QDoubleSpinBox()
+        self.n_spin.setRange(0, 10)
+        self.n_spin.setValue(0)
+        self.n_spin.setDecimals(1)
+        self.n_spin.setSingleStep(0.1)
+        plasticity_layout.addRow("Hardening Exponent (n):", self.n_spin)
+
+        left_layout.addWidget(plasticity_group)
+
+        # Fiber Orientation Group
+        orientation_group = QGroupBox("Fiber Orientation")
+        orientation_group.setStyleSheet(group_style)
+        orientation_layout = QFormLayout(orientation_group)
+        orientation_layout.setSpacing(8)
+        orientation_layout.setContentsMargins(10, 20, 10, 10)
+
+        # Use 3D Orientation toggle
+        self.use_3d_orientation_check = QCheckBox("Use 3D Orientation Data")
+        self.use_3d_orientation_check.setChecked(False)
+        self.use_3d_orientation_check.stateChanged.connect(self.onUse3DOrientationChanged)
+        orientation_layout.addRow(self.use_3d_orientation_check)
+
+        # Initial Misalignment
+        self.initial_misalignment_spin = QDoubleSpinBox()
+        self.initial_misalignment_spin.setRange(0, 90)
+        self.initial_misalignment_spin.setValue(0)
+        self.initial_misalignment_spin.setSuffix(" °")
+        self.initial_misalignment_spin.setDecimals(2)
+        self.initial_misalignment_spin.setSingleStep(0.1)
+        orientation_layout.addRow("Initial Misalignment:", self.initial_misalignment_spin)
+
+        # Standard Deviation
+        self.std_deviation_spin = QDoubleSpinBox()
+        self.std_deviation_spin.setRange(0, 30)
+        self.std_deviation_spin.setValue(0)
+        self.std_deviation_spin.setSuffix(" °")
+        self.std_deviation_spin.setDecimals(2)
+        self.std_deviation_spin.setSingleStep(0.1)
+        orientation_layout.addRow("Standard Deviation:", self.std_deviation_spin)
+
+        left_layout.addWidget(orientation_group)
+
+        # Results Group
+        results_group = QGroupBox("Results")
+        results_group.setStyleSheet(group_style)
+        results_layout = QFormLayout(results_group)
+        results_layout.setSpacing(8)
+        results_layout.setContentsMargins(10, 20, 10, 10)
+
+        self.strength_label = QLabel("--")
+        self.strength_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        results_layout.addRow("Compressive Strength:", self.strength_label)
+
+        self.strain_label = QLabel("--")
+        self.strain_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        results_layout.addRow("Ultimate Strain:", self.strain_label)
+
+        left_layout.addWidget(results_group)
+        left_layout.addStretch()
+
+        layout.addWidget(left_panel)
+
+        # Histogram Panel (initially hidden, shown when Histogram button is clicked)
+        self.histogram_panel = HistogramPanel()
+        self.histogram_panel.setVisible(False)
+        layout.addWidget(self.histogram_panel)
+
+        # Right panel - Stress-Strain Graph Display
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Matplotlib figure for stress-strain curve
+        self.figure = Figure(figsize=(6, 5), facecolor='white')
+        self.canvas = FigureCanvas(self.figure)
+        self.ax = self.figure.add_subplot(111)
+        self.ax.set_xlabel('Strain')
+        self.ax.set_ylabel('Stress (MPa)')
+        self.ax.set_title('Stress-Strain Curve')
+        self.ax.grid(True, alpha=0.3)
+        self.figure.tight_layout()
+
+        right_layout.addWidget(self.canvas)
+
+        layout.addWidget(right_panel, 1)  # Right panel expands
+
+    def updateResults(self, strength, strain):
+        """Update the results labels"""
+        self.strength_label.setText(f"{strength:.2f} MPa")
+        self.strain_label.setText(f"{strain:.4f}")
+
+    def plotStressStrain(self, strain_array, stress_curve, case_name=None):
+        """Add stress-strain curve to the plot with case name as legend"""
+        # Plot with case name as label
+        label = case_name if case_name else f"Case {len(self.ax.lines) + 1}"
+        self.ax.plot(strain_array, stress_curve, linewidth=2, label=label)
+        self.ax.set_xlabel('Strain')
+        self.ax.set_ylabel('Stress (MPa)')
+        self.ax.set_title('Stress-Strain Curve')
+        self.ax.grid(True, alpha=0.3)
+        self.ax.legend(loc='best')
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def clearGraph(self):
+        """Clear all curves from the graph"""
+        self.ax.clear()
+        self.ax.set_xlabel('Strain')
+        self.ax.set_ylabel('Stress (MPa)')
+        self.ax.set_title('Stress-Strain Curve')
+        self.ax.grid(True, alpha=0.3)
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def onPresetChanged(self, preset_name):
+        """Apply material preset values"""
+        if preset_name == "Custom":
+            return
+
+        if preset_name in self.material_presets:
+            params = self.material_presets[preset_name]
+            # Block signals to prevent triggering preset change back to Custom
+            self.e1_spin.blockSignals(True)
+            self.e2_spin.blockSignals(True)
+            self.nu_spin.blockSignals(True)
+            self.g_spin.blockSignals(True)
+            self.tau_y_spin.blockSignals(True)
+            self.k_spin.blockSignals(True)
+            self.n_spin.blockSignals(True)
+
+            # Set values
+            self.e1_spin.setValue(params.get('longitudinal_modulus', 150000))
+            self.e2_spin.setValue(params.get('transverse_modulus', 10000))
+            self.nu_spin.setValue(params.get('poisson_ratio', 0.3))
+            self.g_spin.setValue(params.get('shear_modulus', 5000))
+            self.tau_y_spin.setValue(params.get('tau_y', 50))
+            self.k_spin.setValue(params.get('K', 0.1))
+            self.n_spin.setValue(params.get('n', 2.0))
+
+            # Unblock signals
+            self.e1_spin.blockSignals(False)
+            self.e2_spin.blockSignals(False)
+            self.nu_spin.blockSignals(False)
+            self.g_spin.blockSignals(False)
+            self.tau_y_spin.blockSignals(False)
+            self.k_spin.blockSignals(False)
+            self.n_spin.blockSignals(False)
+
+    def onUse3DOrientationChanged(self, state):
+        """Toggle between manual input and 3D orientation data"""
+        use_3d = (state == Qt.Checked.value) if hasattr(Qt.Checked, 'value') else (state == 2)
+        # Disable/enable manual input fields
+        self.initial_misalignment_spin.setEnabled(not use_3d)
+        self.std_deviation_spin.setEnabled(not use_3d)
+
 
 class ACSCMainWindow(QMainWindow):
     def __init__(self):
@@ -3310,6 +4315,12 @@ class ACSCMainWindow(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle("ACSC - Axial Compressive Strength Calculator")
+
+        # Set application icon
+        import os
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'acsc_logo.png')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         # Set application style
         self.setStyleSheet("""
@@ -3360,12 +4371,18 @@ class ACSCMainWindow(QMainWindow):
 
         # Simulation tab
         self.simulation_tab = SimulationTab()
+        self.simulation_tab.setMainWindow(self)
         self.tabs.addTab(self.simulation_tab, "Simulation")
 
         main_layout.addWidget(self.tabs)
 
+        # Simulation content panel (shown when Simulation tab is selected)
+        self.simulation_content = SimulationContentPanel()
+        self.simulation_content.setVisible(False)
+        main_layout.addWidget(self.simulation_content)
+
         # Create horizontal splitter for viewer and left slider panel
-        content_splitter = QSplitter(Qt.Horizontal)
+        self.content_splitter = QSplitter(Qt.Horizontal)
 
         # Left slider panel (only sliders)
         slider_panel = QWidget()
@@ -3373,22 +4390,6 @@ class ACSCMainWindow(QMainWindow):
         slider_panel.setMinimumWidth(200)
         slider_layout = QVBoxLayout(slider_panel)
         slider_layout.setContentsMargins(10, 10, 10, 10)
-
-        # Opacity slider
-        opacity_group = QGroupBox("Opacity")
-        opacity_layout = QVBoxLayout(opacity_group)
-
-        self.opacity_slider = QSlider(Qt.Horizontal)
-        self.opacity_slider.setRange(0, 100)
-        self.opacity_slider.setValue(100)
-        self.opacity_slider.valueChanged.connect(self.updateOpacity)
-        opacity_layout.addWidget(self.opacity_slider)
-
-        self.opacity_label = QLabel("100%")
-        self.opacity_label.setAlignment(Qt.AlignCenter)
-        opacity_layout.addWidget(self.opacity_label)
-
-        slider_layout.addWidget(opacity_group)
 
         # Slice control sliders
         slice_group = QGroupBox("Slice Controls")
@@ -3429,20 +4430,6 @@ class ACSCMainWindow(QMainWindow):
 
         slider_layout.addWidget(slice_group)
 
-        # Isosurface value control
-        iso_group = QGroupBox("Isosurface")
-        iso_layout = QVBoxLayout(iso_group)
-
-        iso_layout.addWidget(QLabel("Iso Value:"))
-        self.iso_spin = QDoubleSpinBox()
-        self.iso_spin.setEnabled(False)
-        self.iso_spin.setRange(0, 255)
-        self.iso_spin.setValue(128)
-        self.iso_spin.valueChanged.connect(self.updateIsosurface)
-        iso_layout.addWidget(self.iso_spin)
-
-        slider_layout.addWidget(iso_group)
-
         # Noise-scale control for Analysis
         noise_group = QGroupBox("Analysis")
         noise_layout = QVBoxLayout(noise_group)
@@ -3464,16 +4451,16 @@ class ACSCMainWindow(QMainWindow):
 
         slider_layout.addStretch()
 
-        content_splitter.addWidget(slider_panel)
+        self.content_splitter.addWidget(slider_panel)
 
         # Histogram Panel (initially hidden)
         self.histogram_panel = HistogramPanel()
         self.histogram_panel.setVisible(False)
-        content_splitter.addWidget(self.histogram_panel)
+        self.content_splitter.addWidget(self.histogram_panel)
 
         # 2D Slice Viewer (lightweight matplotlib-based viewer)
-        self.viewer = Viewer2D()
-        content_splitter.addWidget(self.viewer)
+        self.viewer = Viewer2D(parent_window=self)
+        self.content_splitter.addWidget(self.viewer)
 
         # Connect visualization controls to viewer
         self.visualization_tab.connectViewer(self.viewer)
@@ -3542,11 +4529,11 @@ class ACSCMainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self.onTabChanged)
 
         # Set splitter proportions and add separator line
-        content_splitter.setStretchFactor(0, 0)  # Slider panel fixed size
-        content_splitter.setStretchFactor(1, 1)  # Viewer takes remaining space
+        self.content_splitter.setStretchFactor(0, 0)  # Slider panel fixed size
+        self.content_splitter.setStretchFactor(1, 1)  # Viewer takes remaining space
 
         # Style the splitter to show a visible separator line
-        content_splitter.setStyleSheet("""
+        self.content_splitter.setStyleSheet("""
             QSplitter::handle {
                 background-color: #d0d0d0;
                 width: 1px;
@@ -3558,7 +4545,7 @@ class ACSCMainWindow(QMainWindow):
             }
         """)
 
-        main_layout.addWidget(content_splitter)
+        main_layout.addWidget(self.content_splitter)
 
         # Progress bar at bottom
         self.progress_bar = QProgressBar()
@@ -3584,14 +4571,6 @@ class ACSCMainWindow(QMainWindow):
         self.status_label = QLabel("Ready")
         self.statusBar().addWidget(self.status_label)
 
-    def updateOpacity(self):
-        """Update viewer opacity from main window slider"""
-        value = self.opacity_slider.value()
-        self.opacity_label.setText(f"{value}%")
-        if self.viewer:
-            self.viewer.setOpacity(value / 100.0)
-
-
     def updateNoiseScale(self):
         """Update noise scale value for analysis"""
         value = self.noise_scale_slider.value()
@@ -3609,10 +4588,17 @@ class ACSCMainWindow(QMainWindow):
 
     def onTabChanged(self, index):
         """Handle tab change to show/hide appropriate controls"""
-        if index == 1:  # Analysis tab (index 1)
-            self.noise_group.setVisible(True)
-        else:
+        if index == 2:  # Simulation tab (index 2)
+            # Hide slicer view, show simulation content
+            self.content_splitter.setVisible(False)
+            self.simulation_content.setVisible(True)
             self.noise_group.setVisible(False)
+        else:
+            # Show slicer view, hide simulation content
+            self.content_splitter.setVisible(True)
+            self.simulation_content.setVisible(False)
+            # Show noise group only for Analysis tab
+            self.noise_group.setVisible(index == 1)
 
 
     def updateSlices(self):
@@ -3658,11 +4644,6 @@ class ACSCMainWindow(QMainWindow):
         # Update viewer
         self.updateSlices()
 
-    def updateIsosurface(self):
-        """Update isosurface from main window control"""
-        if self.viewer:
-            self.viewer.updateIsosurface(self.iso_spin.value())
-
     def updateControlsForRenderMode(self, method):
         """Enable/disable controls based on render mode"""
         # Reset all controls
@@ -3672,7 +4653,6 @@ class ACSCMainWindow(QMainWindow):
         self.x_slice_spin.setEnabled(False)
         self.y_slice_spin.setEnabled(False)
         self.z_slice_spin.setEnabled(False)
-        self.iso_spin.setEnabled(False)
 
         # Enable appropriate controls
         if method == "Slices":
@@ -3682,8 +4662,6 @@ class ACSCMainWindow(QMainWindow):
             self.x_slice_spin.setEnabled(True)
             self.y_slice_spin.setEnabled(True)
             self.z_slice_spin.setEnabled(True)
-        elif method == "Isosurface":
-            self.iso_spin.setEnabled(True)
 
 # Color bar methods removed - PyVista handles color bar automatically
 
@@ -3716,12 +4694,6 @@ class ACSCMainWindow(QMainWindow):
             self.x_slice_spin.setEnabled(True)
             self.y_slice_spin.setEnabled(True)
             self.z_slice_spin.setEnabled(True)
-
-            # Update isosurface range (not used in 2D viewer but keep for compatibility)
-            self.iso_spin.setRange(np.min(volume), np.max(volume))
-            self.iso_spin.setValue(np.mean(volume))
-
-# Color bar updates removed - PyVista handles color bar automatically
 
         # Switch to visualization tab
         self.tabs.setCurrentWidget(self.visualization_tab)
