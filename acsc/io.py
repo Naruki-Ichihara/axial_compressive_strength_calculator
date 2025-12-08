@@ -107,14 +107,18 @@ def import_image_sequence(path_template: str,
     
     if process is None:
         process = lambda image: image
+
+    # Calculate end index: start from initial_number and import number_of_images
+    end_number = initial_number + number_of_images
+
     if format == "dcm":
         volume = np.stack(
         [process(import_dicom(get_image_path(path_template, i, number_of_digits, format)))
-         for i in range(initial_number, number_of_images)], axis=0)
+         for i in range(initial_number, end_number)], axis=0)
     else:
         volume = np.stack(
         [process(import_image(get_image_path(path_template, i, number_of_digits, format), cvt_control))
-         for i in range(initial_number, number_of_images)], axis=0)
+         for i in range(initial_number, end_number)], axis=0)
     
     if path_for_save is not None:
         np.save(path_for_save, volume)

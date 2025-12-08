@@ -1,5 +1,6 @@
 import sys
 import os
+import colorsys
 from pathlib import Path
 from typing import Optional
 import numpy as np
@@ -20,6 +21,9 @@ matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+import pyvista as pv
+from pyvistaqt import QtInteractor
 
 class ImportDialog(QWidget):
     volume_imported = Signal(np.ndarray)
@@ -111,10 +115,11 @@ class ImportDialog(QWidget):
         self.num_digits_spin.setValue(4)
         left_layout.addWidget(self.num_digits_spin, 2, 1)
 
-        left_layout.addWidget(QLabel("Initial Number:"), 3, 0)
+        left_layout.addWidget(QLabel("Start Index:"), 3, 0)
         self.initial_number_spin = QSpinBox()
-        self.initial_number_spin.setRange(0, 9999)
+        self.initial_number_spin.setRange(0, 99999)
         self.initial_number_spin.setValue(0)
+        self.initial_number_spin.setToolTip("Starting file number (e.g., 100 to start from img_0100.tif)")
         left_layout.addWidget(self.initial_number_spin, 3, 1)
 
         params_layout.addWidget(left_params)
@@ -379,6 +384,122 @@ class ImportWorker(QThread):
 
         except Exception as e:
             self.error.emit(str(e))
+
+
+class ExportScreenshotDialog(QDialog):
+    """Dialog for configuring screenshot export settings."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export Screenshot")
+        self.setMinimumWidth(300)
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # View selection
+        view_group = QGroupBox("Select View")
+        view_layout = QVBoxLayout(view_group)
+
+        self.view_combo = QComboBox()
+        self.view_combo.addItems(["3D View", "XY Slice", "XZ Slice", "YZ Slice"])
+        self.view_combo.currentTextChanged.connect(self.onViewChanged)
+        view_layout.addWidget(self.view_combo)
+
+        layout.addWidget(view_group)
+
+        # Background color
+        bg_group = QGroupBox("Background Color")
+        bg_layout = QVBoxLayout(bg_group)
+
+        self.bg_combo = QComboBox()
+        self.bg_combo.addItems(["White", "Transparent", "Gray"])
+        bg_layout.addWidget(self.bg_combo)
+
+        layout.addWidget(bg_group)
+
+        # CT overlay option (only for slice views)
+        self.ct_group = QGroupBox("Slice Options")
+        ct_layout = QVBoxLayout(self.ct_group)
+
+        self.include_ct_check = QCheckBox("Include CT Image Overlay")
+        self.include_ct_check.setChecked(True)
+        ct_layout.addWidget(self.include_ct_check)
+
+        layout.addWidget(self.ct_group)
+
+        # Resolution selection
+        res_group = QGroupBox("Resolution")
+        res_layout = QVBoxLayout(res_group)
+
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.addItems([
+            "Current View",
+            "800 x 600",
+            "1024 x 768",
+            "1280 x 960",
+            "1600 x 1200",
+            "1920 x 1440",
+            "2560 x 1920",
+            "3840 x 2880"
+        ])
+        self.resolution_combo.setCurrentIndex(0)  # Default: Current View
+        res_layout.addWidget(self.resolution_combo)
+
+        layout.addWidget(res_group)
+
+        # Legend options
+        legend_group = QGroupBox("Legend")
+        legend_layout = QVBoxLayout(legend_group)
+
+        self.include_legend_check = QCheckBox("Include Color Legend")
+        self.include_legend_check.setChecked(True)
+        self.include_legend_check.setToolTip("Include color wheel (azimuth mode) or colorbar (tilt mode)")
+        legend_layout.addWidget(self.include_legend_check)
+
+        layout.addWidget(legend_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.ok_btn = QPushButton("Export")
+        self.ok_btn.clicked.connect(self.accept)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+
+        button_layout.addStretch()
+        button_layout.addWidget(self.ok_btn)
+        button_layout.addWidget(self.cancel_btn)
+
+        layout.addLayout(button_layout)
+
+        # Initial state
+        self.onViewChanged(self.view_combo.currentText())
+
+    def onViewChanged(self, view):
+        """Enable/disable CT overlay option based on view selection."""
+        is_slice = view != "3D View"
+        self.ct_group.setEnabled(is_slice)
+        if not is_slice:
+            self.include_ct_check.setChecked(False)
+
+    def getSettings(self):
+        """Return the current dialog settings."""
+        # Parse resolution string (e.g., "1280 x 960" -> (1280, 960))
+        res_text = self.resolution_combo.currentText()
+        if res_text == "Current View":
+            resolution = None  # Use current view size
+        else:
+            width, height = map(int, res_text.replace(" ", "").split("x"))
+            resolution = (width, height)
+        return {
+            'view': self.view_combo.currentText(),
+            'background': self.bg_combo.currentText(),
+            'include_ct': self.include_ct_check.isChecked(),
+            'resolution': resolution,
+            'include_legend': self.include_legend_check.isChecked()
+        }
+
 
 class RibbonButton(QPushButton):
     def __init__(self, text, icon_name=None):
@@ -1057,6 +1178,10 @@ class Viewer2D(QWidget):
         self.pan_active = False
         self.pan_start = None
         self.pan_view = None
+
+        # Fiber detection visualization
+        self.fiber_detection_result = None
+        self.show_fiber_detection = False
 
         self.initUI()
 
@@ -1812,6 +1937,78 @@ class Viewer2D(QWidget):
                                color='red', fontsize=9, fontweight='bold',
                                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='red'))
 
+    def _renderFiberDetection(self):
+        """Render fiber detection results on XY view (optimized)"""
+        if not self.show_fiber_detection or self.fiber_detection_result is None:
+            return
+
+        result = self.fiber_detection_result
+        roi_offset = result['roi_offset']
+        settings = result['settings']
+        all_slices = result.get('all_slices', {})
+
+        # Check if current slice has detection results
+        if self.slice_z not in all_slices:
+            return
+
+        slice_data = all_slices[self.slice_z]
+        centers = slice_data['centers']
+        diameters = slice_data['diameters']
+        labels = slice_data.get('labels', None)
+
+        if len(centers) == 0:
+            return
+
+        x_offset, y_offset = roi_offset
+
+        # Pre-compute global coordinates
+        global_centers_x = centers[:, 0] + x_offset
+        global_centers_y = centers[:, 1] + y_offset
+
+        # Draw watershed regions with color-coded overlay
+        if settings.get('show_watershed', True) and labels is not None:
+            # Create a colormap for the labels
+            from matplotlib.colors import ListedColormap
+            import matplotlib.cm as cm
+
+            # Get number of labels
+            n_labels = labels.max()
+            if n_labels > 0:
+                # Create random colormap for distinct fiber colors
+                np.random.seed(42)  # For consistent colors
+                colors = cm.tab20(np.linspace(0, 1, 20))
+                # Extend colors if needed
+                if n_labels > 20:
+                    colors = np.tile(colors, (n_labels // 20 + 1, 1))[:n_labels]
+
+                # Create masked array for labels (0 = background = transparent)
+                labels_masked = np.ma.masked_where(labels == 0, labels)
+
+                # Create extent for proper positioning
+                roi_bounds = result.get('roi_bounds')
+                if roi_bounds:
+                    z_min, z_max, y_min, y_max, x_min, x_max = roi_bounds
+                    extent = [x_min, x_min + labels.shape[1], y_min, y_min + labels.shape[0]]
+                else:
+                    extent = [x_offset, x_offset + labels.shape[1],
+                              y_offset, y_offset + labels.shape[0]]
+
+                # Display watershed regions with colormap
+                self.ax_xy.imshow(labels_masked, cmap='tab20', origin='lower',
+                                 extent=extent, alpha=0.5, zorder=3,
+                                 interpolation='nearest')
+
+        # Draw detected fiber centers
+        if settings.get('show_centers', True):
+            marker_size = settings.get('center_marker_size', 3)
+            self.ax_xy.scatter(global_centers_x, global_centers_y,
+                              c='red', s=marker_size**2, marker='o',
+                              edgecolors='white', linewidths=0.5,
+                              zorder=10, label=f'{len(centers)} fibers')
+            # Add legend only when centers are shown
+            self.ax_xy.legend(loc='upper right', fontsize=8,
+                             facecolor='white', edgecolor='gray', framealpha=0.9)
+
     def enableZoom(self, enabled):
         """Enable or disable zoom mode"""
         self.zoom_enabled = enabled
@@ -2183,6 +2380,9 @@ class Viewer2D(QWidget):
         # Render orientation overlays if active
         self._renderOrientationOverlay()
 
+        # Render fiber detection results if available
+        self._renderFiberDetection()
+
         # Draw ROI rectangles
         self._drawAllROIOverlays()
 
@@ -2259,6 +2459,10 @@ class Viewer2D(QWidget):
             self.ax_xy.axis('off')
             # Draw axis arrows
             self._drawAxisArrows(self.ax_xy, 'xy', slice_xy.shape)
+
+            # Render fiber detection results if available
+            self._renderFiberDetection()
+
             self.figure_xy.tight_layout()
 
             # Render XZ plane (Y slice)
@@ -2576,7 +2780,8 @@ class Viewer2D(QWidget):
                             "This feature requires the 3D PyVista viewer.")
 
 
-class VisualizationTab(QWidget):
+class VolumeTab(QWidget):
+    """Tab for volume data visualization and import."""
     def __init__(self, viewer=None):
         super().__init__()
         self.viewer = viewer
@@ -2732,6 +2937,2193 @@ class VisualizationTab(QWidget):
 
 # Volume info setting removed - now handled by main window
 
+
+class VisualizationTab(QWidget):
+    """Tab for fiber trajectory visualization with 2x2 viewport layout."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.main_window = None
+        self.fiber_trajectory = None
+        self.structure_tensor = None
+        self.volume_data = None  # CT volume for overlay
+        self.current_slice = {'x': 0, 'y': 0, 'z': 0}
+        self.volume_shape = None
+        self.roi_trajectories = {}  # Store trajectories for each ROI
+        # Fiber trajectory settings (stored for use by settings dialog)
+        self.trajectory_settings = {
+            'fiber_diameter': 12.0,
+            'volume_fraction': 0.5,
+            'propagation_axis': 'Z (default)',
+            'integration_method': 'RK4',
+            'tilt_min': 0.0,
+            'tilt_max': 20.0,
+            'sat_min': 0.0,
+            'sat_max': 20.0,
+            'relax': True,
+            'color_by_angle': True,
+            'show_fiber_diameter': False,
+            'resample': False,
+            'resample_interval': 20
+        }
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Ribbon toolbar (matching other tabs - simplified)
+        toolbar = QFrame()
+        toolbar.setStyleSheet("QFrame { background-color: #f0f0f0; border-bottom: 1px solid #d0d0d0; }")
+        toolbar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setSpacing(10)
+        toolbar_layout.setContentsMargins(5, 5, 5, 5)
+
+        # Settings Group (first)
+        settings_group = QGroupBox("Settings")
+        settings_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        settings_layout = QVBoxLayout(settings_group)
+
+        self.settings_btn = RibbonButton("Settings")
+        self.settings_btn.clicked.connect(self.openSettingsDialog)
+        settings_layout.addWidget(self.settings_btn)
+
+        toolbar_layout.addWidget(settings_group)
+
+        # Fiber Trajectory Group
+        fiber_group = QGroupBox("Fiber Trajectory")
+        fiber_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        fiber_layout = QHBoxLayout(fiber_group)
+
+        self.generate_btn = RibbonButton("Generate\nTrajectory")
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.clicked.connect(self.generateTrajectory)
+        fiber_layout.addWidget(self.generate_btn)
+
+        toolbar_layout.addWidget(fiber_group)
+
+        # Export Group
+        export_group = QGroupBox("Export")
+        export_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        export_layout = QHBoxLayout(export_group)
+
+        self.export_screenshot_btn = RibbonButton("Export\nScreenshot")
+        self.export_screenshot_btn.setEnabled(False)
+        self.export_screenshot_btn.clicked.connect(self.showExportScreenshotDialog)
+        export_layout.addWidget(self.export_screenshot_btn)
+
+        toolbar_layout.addWidget(export_group)
+
+        toolbar_layout.addStretch()
+        layout.addWidget(toolbar)
+
+        # Main content: left panel + 2x2 viewports
+        content_splitter = QSplitter(Qt.Horizontal)
+
+        # Left panel for controls - use scroll area for responsiveness
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        left_scroll.setMinimumWidth(180)
+        left_scroll.setMaximumWidth(280)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(5, 5, 5, 5)
+
+        # ROI Pipeline Group
+        roi_group = QGroupBox("ROI Pipeline")
+        roi_layout = QVBoxLayout(roi_group)
+
+        roi_info_label = QLabel("Select ROIs to display:")
+        roi_info_label.setStyleSheet("color: #666; font-size: 10px;")
+        roi_layout.addWidget(roi_info_label)
+
+        # Scroll area for ROI checkboxes
+        self.roi_scroll = QScrollArea()
+        self.roi_scroll.setWidgetResizable(True)
+        self.roi_scroll.setMaximumHeight(120)
+        self.roi_list_widget = QWidget()
+        self.roi_list_layout = QVBoxLayout(self.roi_list_widget)
+        self.roi_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.roi_list_layout.setSpacing(2)
+        self.roi_checkboxes = {}  # Store ROI checkboxes
+        # Initial message
+        no_roi_label = QLabel("No ROIs available")
+        no_roi_label.setStyleSheet("color: #888; font-style: italic;")
+        self.roi_list_layout.addWidget(no_roi_label)
+        self.roi_checkboxes['_no_roi'] = no_roi_label
+        self.roi_list_layout.addStretch()
+        self.roi_scroll.setWidget(self.roi_list_widget)
+        roi_layout.addWidget(self.roi_scroll)
+
+        # Refresh ROI list button
+        self.refresh_roi_btn = QPushButton("Refresh ROI List")
+        self.refresh_roi_btn.clicked.connect(self.refreshROIList)
+        roi_layout.addWidget(self.refresh_roi_btn)
+
+        left_layout.addWidget(roi_group)
+
+        # Display Options Group
+        display_group = QGroupBox("Display Options")
+        display_layout = QVBoxLayout(display_group)
+
+        self.show_ct_check = QCheckBox("Show CT Image")
+        self.show_ct_check.setChecked(False)
+        self.show_ct_check.stateChanged.connect(self.updateSliceViews)
+        display_layout.addWidget(self.show_ct_check)
+
+        self.ct_opacity_label = QLabel("CT Opacity: 50%")
+        display_layout.addWidget(self.ct_opacity_label)
+        self.ct_opacity_slider = QSlider(Qt.Horizontal)
+        self.ct_opacity_slider.setRange(0, 100)
+        self.ct_opacity_slider.setValue(50)
+        self.ct_opacity_slider.valueChanged.connect(self.onCTOpacityChanged)
+        display_layout.addWidget(self.ct_opacity_slider)
+
+        left_layout.addWidget(display_group)
+
+        # 3D Visualization Mode Group
+        vis_mode_group = QGroupBox("3D Visualization")
+        vis_mode_layout = QVBoxLayout(vis_mode_group)
+
+        # Line width slider for fiber trajectories
+        line_width_layout = QHBoxLayout()
+        line_width_layout.addWidget(QLabel("Line Width:"))
+        self.line_width_slider = QSlider(Qt.Horizontal)
+        self.line_width_slider.setRange(1, 10)
+        self.line_width_slider.setValue(2)
+        self.line_width_slider.valueChanged.connect(self.updateVisualization)
+        line_width_layout.addWidget(self.line_width_slider)
+        self.line_width_label = QLabel("2")
+        self.line_width_label.setMinimumWidth(20)
+        self.line_width_slider.valueChanged.connect(lambda v: self.line_width_label.setText(f"{v}"))
+        line_width_layout.addWidget(self.line_width_label)
+        vis_mode_layout.addLayout(line_width_layout)
+
+        left_layout.addWidget(vis_mode_group)
+
+        # Camera Preset Group
+        camera_group = QGroupBox("3D Camera")
+        camera_layout = QVBoxLayout(camera_group)
+
+        camera_layout.addWidget(QLabel("View Preset:"))
+        self.camera_preset_combo = QComboBox()
+        self.camera_preset_combo.addItems([
+            "Isometric",
+            "Front (XY)",
+            "Back (-XY)",
+            "Right (YZ)",
+            "Left (-YZ)",
+            "Top (XZ)",
+            "Bottom (-XZ)"
+        ])
+        self.camera_preset_combo.currentTextChanged.connect(self.setCameraPreset)
+        self.camera_preset_combo.setToolTip("Select a preset camera view for 3D visualization")
+        camera_layout.addWidget(self.camera_preset_combo)
+
+        # Reset camera button
+        self.reset_camera_btn = QPushButton("Reset Camera")
+        self.reset_camera_btn.clicked.connect(self.resetCamera)
+        self.reset_camera_btn.setToolTip("Reset camera to fit all visible objects")
+        camera_layout.addWidget(self.reset_camera_btn)
+
+        # Perspective projection toggle
+        self.perspective_check = QCheckBox("Perspective Projection")
+        self.perspective_check.setChecked(True)
+        self.perspective_check.stateChanged.connect(self.togglePerspective)
+        self.perspective_check.setToolTip("ON: Perspective projection (realistic)\nOFF: Parallel/Orthographic projection")
+        camera_layout.addWidget(self.perspective_check)
+
+        left_layout.addWidget(camera_group)
+
+        # Colormap Group
+        colormap_group = QGroupBox("Colormap")
+        colormap_layout = QVBoxLayout(colormap_group)
+
+        colormap_layout.addWidget(QLabel("Color Mode:"))
+        self.color_mode_combo = QComboBox()
+        self.color_mode_combo.addItems(["Tilt Angle", "Azimuth (HSV)"])
+        self.color_mode_combo.currentTextChanged.connect(self.updateVisualization)
+        self.color_mode_combo.setToolTip("Tilt: color by angle from fiber axis\nAzimuth: color by direction in cross-section (HSV)")
+        colormap_layout.addWidget(self.color_mode_combo)
+
+        colormap_layout.addWidget(QLabel("Colormap (Tilt):"))
+        self.colormap_combo = QComboBox()
+        self.colormap_combo.addItems(["coolwarm", "viridis", "jet", "rainbow", "plasma", "turbo"])
+        self.colormap_combo.currentTextChanged.connect(self.updateVisualization)
+        colormap_layout.addWidget(self.colormap_combo)
+
+        left_layout.addWidget(colormap_group)
+
+        # Slice Controls Group
+        slice_group = QGroupBox("Slice Position")
+        slice_layout = QGridLayout(slice_group)
+
+        slice_layout.addWidget(QLabel("X:"), 0, 0)
+        self.x_slice_slider = QSlider(Qt.Horizontal)
+        self.x_slice_slider.setEnabled(False)
+        self.x_slice_slider.valueChanged.connect(lambda v: self.updateSlicePosition('x', v))
+        slice_layout.addWidget(self.x_slice_slider, 0, 1)
+        self.x_slice_label = QLabel("0")
+        self.x_slice_label.setMinimumWidth(40)
+        slice_layout.addWidget(self.x_slice_label, 0, 2)
+
+        slice_layout.addWidget(QLabel("Y:"), 1, 0)
+        self.y_slice_slider = QSlider(Qt.Horizontal)
+        self.y_slice_slider.setEnabled(False)
+        self.y_slice_slider.valueChanged.connect(lambda v: self.updateSlicePosition('y', v))
+        slice_layout.addWidget(self.y_slice_slider, 1, 1)
+        self.y_slice_label = QLabel("0")
+        self.y_slice_label.setMinimumWidth(40)
+        slice_layout.addWidget(self.y_slice_label, 1, 2)
+
+        slice_layout.addWidget(QLabel("Z:"), 2, 0)
+        self.z_slice_slider = QSlider(Qt.Horizontal)
+        self.z_slice_slider.setEnabled(False)
+        self.z_slice_slider.valueChanged.connect(lambda v: self.updateSlicePosition('z', v))
+        slice_layout.addWidget(self.z_slice_slider, 2, 1)
+        self.z_slice_label = QLabel("0")
+        self.z_slice_label.setMinimumWidth(40)
+        slice_layout.addWidget(self.z_slice_label, 2, 2)
+
+        left_layout.addWidget(slice_group)
+
+        # Statistics Group
+        stats_group = QGroupBox("Statistics")
+        stats_layout = QVBoxLayout(stats_group)
+
+        self.stats_label = QLabel("No trajectory generated")
+        self.stats_label.setWordWrap(True)
+        self.stats_label.setStyleSheet("font-size: 10px;")
+        stats_layout.addWidget(self.stats_label)
+
+        left_layout.addWidget(stats_group)
+
+        left_layout.addStretch()
+        left_scroll.setWidget(left_panel)
+        content_splitter.addWidget(left_scroll)
+
+        # Right side: 2x2 viewport grid
+        viewport_widget = QWidget()
+        viewport_widget.setMinimumSize(300, 300)  # Minimum size for viewports
+        viewport_layout = QGridLayout(viewport_widget)
+        viewport_layout.setSpacing(2)
+        viewport_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Create 4 viewport frames with labels
+        self.viewport_frames = []
+        viewport_titles = ["3D View", "XY Slice (Z)", "XZ Slice (Y)", "YZ Slice (X)"]
+
+        for i, title in enumerate(viewport_titles):
+            frame = QFrame()
+            frame.setFrameStyle(QFrame.Box | QFrame.Plain)
+            frame.setStyleSheet("QFrame { background-color: #2a2a2a; border: 1px solid #555; }")
+            frame_layout = QVBoxLayout(frame)
+            frame_layout.setContentsMargins(2, 2, 2, 2)
+            frame_layout.setSpacing(0)
+
+            # Title label
+            title_label = QLabel(title)
+            title_label.setStyleSheet("color: white; font-weight: bold; background-color: #444; padding: 2px;")
+            title_label.setAlignment(Qt.AlignCenter)
+            title_label.setMaximumHeight(20)
+            frame_layout.addWidget(title_label)
+
+            if i == 0:
+                # 3D View: Use PyVista QtInteractor
+                self.plotter_3d = QtInteractor(frame)
+                self.plotter_3d.set_background('#2a2a2a')
+                self.plotter_3d.add_axes()
+                frame_layout.addWidget(self.plotter_3d.interactor)
+                canvas = self.plotter_3d
+
+                # Add color wheel legend overlay
+                self.color_wheel_label = QLabel(frame)
+                self.color_wheel_label.setStyleSheet("background-color: transparent;")
+                self.color_wheel_label.setFixedSize(120, 120)
+                self.color_wheel_label.hide()  # Initially hidden
+                self._create_color_wheel_legend()
+            else:
+                # Slice views: Use Matplotlib canvas
+                fig = Figure(figsize=(4, 4), facecolor='#2a2a2a')
+                fig.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
+                ax = fig.add_subplot(111)
+                ax.set_facecolor('#2a2a2a')
+                ax.tick_params(colors='white', labelsize=8)
+                for spine in ax.spines.values():
+                    spine.set_color('#555')
+                canvas = FigureCanvas(fig)
+                canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                frame_layout.addWidget(canvas)
+                canvas.figure = fig
+                canvas.axes = ax
+
+            row, col = divmod(i, 2)
+            viewport_layout.addWidget(frame, row, col)
+            self.viewport_frames.append({'frame': frame, 'canvas': canvas, 'title': title})
+
+        content_splitter.addWidget(viewport_widget)
+        content_splitter.setStretchFactor(0, 0)  # Left panel doesn't stretch
+        content_splitter.setStretchFactor(1, 1)  # Viewport area stretches
+        content_splitter.setSizes([200, 800])
+        content_splitter.setCollapsible(0, False)  # Prevent left panel from collapsing completely
+        content_splitter.setCollapsible(1, False)  # Prevent viewport from collapsing
+
+        layout.addWidget(content_splitter)
+
+    def _create_color_wheel_legend(self):
+        """Create a color wheel legend image with axis labels for azimuth visualization.
+
+        The color mapping follows the image coordinate system:
+        - azimuth = arctan2(y, x) where y is row direction (down = positive in numpy)
+        - hue = azimuth / 360
+        - 0° (red) = +X direction (right)
+        - 90° (green/yellow) = up direction (visual)
+        - 180° (cyan) = -X direction (left)
+        - 270° (magenta) = down direction (visual)
+
+        Fiber azimuths are converted from numpy to display coordinates using:
+        display_az = (360 - numpy_az) % 360
+        """
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.patches import Wedge
+
+        # Create figure with dark background (no polar projection)
+        fig = Figure(figsize=(1.5, 1.5), dpi=80, facecolor='#2a2a2a')
+        ax = fig.add_subplot(111)  # Standard Cartesian axes
+
+        # Draw color wheel using wedges in Cartesian coordinates
+        # The color wheel shows display coordinates where:
+        # - 0° = +X direction (right) -> red (hue=0)
+        # - 90° = visual up direction -> green/yellow (hue=0.25)
+        # - 180° = -X direction (left) -> cyan (hue=0.5)
+        # - 270° = visual down direction -> magenta (hue=0.75)
+        #
+        # Fiber colors are converted from numpy to display using: (360 - az) % 360
+        n_seg = 72  # Number of angular segments
+        n_rad = 15  # Number of radial segments
+        for i_theta in range(n_seg):
+            # hue from segment index
+            hue = (i_theta + 0.5) / n_seg
+            # Flip across X-axis: use negative angles (clockwise from +X)
+            theta1 = -(i_theta + 1) * 360 / n_seg
+            theta2 = -i_theta * 360 / n_seg
+            for i_r in range(n_rad):
+                r2 = (i_r + 1) / n_rad
+                sat = (i_r + 0.5) / n_rad
+                color = colorsys.hsv_to_rgb(hue, sat, 1.0)
+                wedge = Wedge((0, 0), r2, theta1, theta2, width=1.0 / n_rad,
+                             facecolor=color, edgecolor='none')
+                ax.add_patch(wedge)
+
+        ax.set_xlim(-1.4, 1.4)
+        ax.set_ylim(-1.4, 1.4)
+        ax.set_aspect('equal')
+        ax.axis('off')
+        ax.set_facecolor('#2a2a2a')
+
+        # Add axis labels in display coordinates
+        # Standard math convention: counter-clockwise from +X
+        ax.text(1.2, 0, '+X', fontsize=8, color='white', ha='left', va='center',
+               fontweight='bold')
+        ax.text(-1.2, 0, '-X', fontsize=8, color='white', ha='right', va='center',
+               fontweight='bold')
+        ax.text(0, 1.2, 'Up', fontsize=8, color='white', ha='center', va='bottom',
+               fontweight='bold')
+        ax.text(0, -1.2, 'Down', fontsize=8, color='white', ha='center', va='top',
+               fontweight='bold')
+
+        # Convert to QPixmap
+        canvas_agg = FigureCanvasAgg(fig)
+        canvas_agg.draw()
+
+        # Get the RGBA buffer
+        buf = canvas_agg.buffer_rgba()
+        width, height = fig.canvas.get_width_height()
+
+        # Create QImage and QPixmap
+        from PySide6.QtGui import QImage, QPixmap
+        qimg = QImage(buf, width, height, QImage.Format_RGBA8888)
+        pixmap = QPixmap.fromImage(qimg)
+
+        self.color_wheel_label.setPixmap(pixmap)
+        plt.close(fig)
+
+    def _update_color_wheel_position(self):
+        """Update the position of the color wheel legend in the 3D view."""
+        if hasattr(self, 'color_wheel_label') and self.color_wheel_label:
+            # Position at bottom-right corner of the 3D viewport
+            parent = self.color_wheel_label.parent()
+            if parent:
+                parent_rect = parent.rect()
+                label_size = self.color_wheel_label.size()
+                x = parent_rect.width() - label_size.width() - 10
+                y = parent_rect.height() - label_size.height() - 10
+                self.color_wheel_label.move(x, y)
+
+    def _show_color_wheel_legend(self, show: bool):
+        """Show or hide the color wheel legend."""
+        if hasattr(self, 'color_wheel_label') and self.color_wheel_label:
+            if show:
+                self._update_color_wheel_position()
+                self.color_wheel_label.show()
+                self.color_wheel_label.raise_()
+            else:
+                self.color_wheel_label.hide()
+
+    def resizeEvent(self, event):
+        """Handle resize events to reposition the color wheel legend."""
+        super().resizeEvent(event)
+        if hasattr(self, 'color_wheel_label') and self.color_wheel_label.isVisible():
+            self._update_color_wheel_position()
+
+    def updateMainStatus(self, message: str):
+        """Update the main window status bar with a message."""
+        if self.main_window and hasattr(self.main_window, 'status_label'):
+            self.main_window.status_label.setText(message)
+            QApplication.processEvents()
+
+    def setMainWindow(self, main_window):
+        """Set reference to main window for accessing shared data."""
+        self.main_window = main_window
+
+    def setStructureTensor(self, structure_tensor, volume_shape, volume_data=None):
+        """Set structure tensor data for trajectory generation."""
+        self.structure_tensor = structure_tensor
+        self.volume_shape = volume_shape
+        self.volume_data = volume_data
+        self.generate_btn.setEnabled(True)
+
+        # Update slice sliders
+        if volume_shape is not None:
+            self.x_slice_slider.setRange(0, volume_shape[2] - 1)
+            self.x_slice_slider.setValue(volume_shape[2] // 2)
+            self.x_slice_slider.setEnabled(True)
+
+            self.y_slice_slider.setRange(0, volume_shape[1] - 1)
+            self.y_slice_slider.setValue(volume_shape[1] // 2)
+            self.y_slice_slider.setEnabled(True)
+
+            self.z_slice_slider.setRange(0, volume_shape[0] - 1)
+            self.z_slice_slider.setValue(volume_shape[0] // 2)
+            self.z_slice_slider.setEnabled(True)
+
+    def updateSlicePosition(self, axis, value):
+        """Update slice position for a given axis."""
+        self.current_slice[axis] = value
+        if axis == 'x':
+            self.x_slice_label.setText(str(value))
+        elif axis == 'y':
+            self.y_slice_label.setText(str(value))
+        elif axis == 'z':
+            self.z_slice_label.setText(str(value))
+        self.updateSliceViews()
+
+    def onCTOpacityChanged(self, value):
+        """Handle CT opacity slider change."""
+        self.ct_opacity_label.setText(f"CT Opacity: {value}%")
+        if self.show_ct_check.isChecked():
+            self.updateSliceViews()
+
+    def showEvent(self, event):
+        """Called when the tab becomes visible."""
+        super().showEvent(event)
+        # Auto-refresh ROI list when tab is shown
+        self.refreshROIList()
+
+    def refreshROIList(self):
+        """Refresh the list of available ROIs from the main window."""
+        if self.main_window is None or not hasattr(self.main_window, 'viewer'):
+            return
+
+        # Clear all widgets from layout
+        while self.roi_list_layout.count():
+            item = self.roi_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.roi_checkboxes.clear()
+
+        # Get ROIs from viewer
+        rois = self.main_window.viewer.rois if hasattr(self.main_window.viewer, 'rois') else {}
+
+        if not rois:
+            no_roi_label = QLabel("No ROIs available")
+            no_roi_label.setStyleSheet("color: #888; font-style: italic;")
+            self.roi_list_layout.addWidget(no_roi_label)
+            self.roi_checkboxes['_no_roi'] = no_roi_label
+            self.roi_list_layout.addStretch()
+            return
+
+        # Add checkbox for each ROI, preserving previous selection state
+        # By default, all ROIs are selected
+        previously_selected = list(self.roi_trajectories.keys()) if self.roi_trajectories else None
+
+        for i, roi_name in enumerate(sorted(rois.keys())):
+            checkbox = QCheckBox(roi_name)
+            # Check if was previously selected, otherwise check all ROIs by default
+            if previously_selected is not None:
+                checkbox.setChecked(roi_name in previously_selected)
+            else:
+                checkbox.setChecked(True)  # Select all ROIs by default
+            checkbox.stateChanged.connect(self.onROISelectionChanged)
+            self.roi_list_layout.addWidget(checkbox)
+            self.roi_checkboxes[roi_name] = checkbox
+
+        self.roi_list_layout.addStretch()
+
+    def onROISelectionChanged(self):
+        """Handle ROI selection change - regenerate trajectories for selected ROIs."""
+        self.updateVisualization()
+
+    def getSelectedROIs(self):
+        """Get list of selected ROI names."""
+        selected = []
+        for roi_name, checkbox in self.roi_checkboxes.items():
+            if roi_name != '_no_roi' and isinstance(checkbox, QCheckBox) and checkbox.isChecked():
+                selected.append(roi_name)
+        return selected
+
+    def generateTrajectory(self):
+        """Generate fiber trajectory for selected ROIs."""
+        from acsc.fiber_trajectory import create_fiber_distribution, FiberTrajectory, detect_fiber_centers
+        from acsc.analysis import compute_structure_tensor
+
+        # Get selected ROIs
+        selected_rois = self.getSelectedROIs()
+
+        if not selected_rois and self.structure_tensor is None:
+            QMessageBox.warning(self, "Warning", "No ROIs selected and no structure tensor available.\nPlease select ROIs or compute orientation in Analysis tab first.")
+            return
+
+        # Get settings from trajectory_settings
+        fiber_diameter = self.trajectory_settings['fiber_diameter']
+        volume_fraction = self.trajectory_settings['volume_fraction']
+        relax = self.trajectory_settings['relax']
+        use_detected_centers = self.trajectory_settings.get('use_detected_centers', False)
+        detection_interval = self.trajectory_settings.get('detection_interval', 1)
+        max_matching_distance = self.trajectory_settings.get('max_matching_distance', 10.0)
+
+        # Check if detected fiber centers are available when option is enabled
+        fiber_detection_result = None
+        if use_detected_centers and self.main_window and hasattr(self.main_window, 'viewer'):
+            fiber_detection_result = self.main_window.viewer.fiber_detection_result
+            if fiber_detection_result is None:
+                QMessageBox.warning(self, "Warning",
+                    "Image-based tracking is enabled but no fiber detection results available.\n"
+                    "Please run 'Detect Fibers' in the Analysis tab first, or disable this option.")
+                return
+
+        # Get reference vector based on propagation axis selection
+        prop_axis = self.trajectory_settings['propagation_axis']
+        if prop_axis == "X":
+            prop_axis_idx = 2
+        elif prop_axis == "Y":
+            prop_axis_idx = 1
+        else:
+            prop_axis_idx = 0
+        if prop_axis_idx == 2:  # X
+            reference_vector = [1.0, 0.0, 0.0]
+        elif prop_axis_idx == 1:  # Y
+            reference_vector = [0.0, 1.0, 0.0]
+        else:  # Z (default)
+            reference_vector = [0.0, 0.0, 1.0]
+
+        # Clear previous trajectories
+        self.roi_trajectories.clear()
+
+        if selected_rois and self.main_window and hasattr(self.main_window, 'viewer'):
+            # Generate trajectories for each selected ROI
+            rois = self.main_window.viewer.rois
+            total_fibers = 0
+            total_slices = 0
+            all_angles_list = []
+
+            num_rois = len(selected_rois)
+            for roi_idx, roi_name in enumerate(selected_rois):
+                if roi_name not in rois:
+                    continue
+
+                roi_data = rois[roi_name]
+                bounds = roi_data.get('bounds')
+                if bounds is None:
+                    continue
+
+                z_min, z_max, y_min, y_max, x_min, x_max = bounds
+
+                # Get volume data for this ROI
+                if self.main_window.current_volume is not None:
+                    roi_volume = self.main_window.current_volume[z_min:z_max, y_min:y_max, x_min:x_max]
+                    roi_shape = roi_volume.shape
+
+                    # Try to reuse structure tensor from Analysis tab if available
+                    global_st = self.main_window.orientation_data.get('structure_tensor')
+                    roi_structure_tensor = None
+
+                    if global_st is not None:
+                        # Check if ROI bounds are within global structure tensor bounds
+                        # structure_tensor shape is (6, Z, Y, X)
+                        st_z, st_y, st_x = global_st.shape[1], global_st.shape[2], global_st.shape[3]
+                        if z_max <= st_z and y_max <= st_y and x_max <= st_x:
+                            # Extract ROI region from global structure tensor
+                            self.updateMainStatus(f"[{roi_name}] Extracting structure tensor from analysis...")
+                            roi_structure_tensor = global_st[:, z_min:z_max, y_min:y_max, x_min:x_max]
+
+                            # Verify extracted tensor has valid dimensions
+                            if roi_structure_tensor.shape[1] == 0 or roi_structure_tensor.shape[2] == 0 or roi_structure_tensor.shape[3] == 0:
+                                roi_structure_tensor = None
+
+                    if roi_structure_tensor is None:
+                        # Compute structure tensor for this ROI (fallback)
+                        self.updateMainStatus(f"[{roi_name}] Computing structure tensor...")
+                        noise_scale = self.main_window.noise_scale_slider.value() if hasattr(self.main_window, 'noise_scale_slider') else 10
+                        roi_structure_tensor = compute_structure_tensor(roi_volume, noise_scale=noise_scale)
+
+                    # Create fiber trajectory object
+                    fiber_traj = FiberTrajectory(
+                        status_callback=lambda msg, r=roi_name: self.updateMainStatus(f"[{r}] {msg}")
+                    )
+
+                    # Check if we should use detected fiber centers
+                    if use_detected_centers and fiber_detection_result is not None:
+                        # Get initial fiber centers from detection result (first slice of ROI)
+                        all_slices = fiber_detection_result.get('all_slices', {})
+                        detection_roi_bounds = fiber_detection_result.get('roi_bounds')
+
+                        # Find the first slice with detected centers within this ROI
+                        initial_slice = None
+                        initial_centers = None
+                        for z in range(z_min, z_max):
+                            if z in all_slices:
+                                slice_data = all_slices[z]
+                                centers = slice_data['centers']
+                                if len(centers) > 0:
+                                    initial_slice = z
+                                    initial_centers = centers.copy()
+                                    break
+
+                        if initial_centers is None or len(initial_centers) == 0:
+                            self.updateMainStatus(f"[{roi_name}] No detected centers found, using Poisson disk sampling...")
+                            # Fall back to Poisson disk sampling
+                            fiber_traj.initialize(
+                                shape=roi_shape,
+                                fiber_diameter=fiber_diameter,
+                                fiber_volume_fraction=volume_fraction,
+                                scale=1.0,
+                                seed=42 + hash(roi_name) % 1000,
+                                reference_vector=reference_vector
+                            )
+                        else:
+                            self.updateMainStatus(f"[{roi_name}] Using {len(initial_centers)} detected fiber centers...")
+
+                            # Initialize with detected centers
+                            # Centers are in ROI-local coordinates already
+                            fiber_traj.bounds = roi_shape
+
+                            # Determine propagation axis
+                            fiber_traj.reference_vector = np.array(reference_vector, dtype=np.float32)
+                            ref_norm = np.linalg.norm(fiber_traj.reference_vector)
+                            if ref_norm > 0:
+                                fiber_traj.reference_vector = fiber_traj.reference_vector / ref_norm
+                            fiber_traj.propagation_axis = np.argmax(np.abs(fiber_traj.reference_vector))
+
+                            # Set fiber diameter from detection settings
+                            diameters = all_slices[initial_slice]['diameters']
+                            fiber_traj.fiber_diameter = np.mean(diameters) if len(diameters) > 0 else fiber_diameter
+
+                            # Initialize points
+                            fiber_traj.points = initial_centers
+                            fiber_traj.trajectories = [(0, initial_centers.copy())]
+                            fiber_traj.angles = [np.zeros(len(initial_centers))]
+                            fiber_traj.azimuths = [np.zeros(len(initial_centers))]
+
+                            # Initialize per-fiber trajectory data
+                            n_fibers = len(initial_centers)
+                            fiber_traj.fiber_trajectories = [[(0, initial_centers[i].copy())] for i in range(n_fibers)]
+                            fiber_traj.fiber_angles = [[0.0] for _ in range(n_fibers)]
+                            fiber_traj.fiber_azimuths = [[0.0] for _ in range(n_fibers)]
+                            fiber_traj.active_fibers = np.ones(n_fibers, dtype=bool)
+
+                            # Exclude fibers near the boundary from tracking (same as propagation boundary check)
+                            boundary_margin = fiber_traj.fiber_diameter / 2.0
+                            prop_axis = fiber_traj.propagation_axis
+                            if prop_axis == 2:  # Z-axis
+                                dim0_max = roi_shape[1]  # y
+                                dim1_max = roi_shape[2]  # x
+                            elif prop_axis == 1:  # Y-axis
+                                dim0_max = roi_shape[0]  # z
+                                dim1_max = roi_shape[2]  # x
+                            else:  # X-axis
+                                dim0_max = roi_shape[0]  # z
+                                dim1_max = roi_shape[1]  # y
+
+                            near_boundary = (
+                                (initial_centers[:, 0] < boundary_margin) |
+                                (initial_centers[:, 0] > dim1_max - boundary_margin) |
+                                (initial_centers[:, 1] < boundary_margin) |
+                                (initial_centers[:, 1] > dim0_max - boundary_margin)
+                            )
+                            fiber_traj.active_fibers = ~near_boundary
+                            n_excluded = np.sum(near_boundary)
+                            if n_excluded > 0:
+                                print(f"[INFO] [{roi_name}] Excluded {n_excluded} fibers near boundary (margin={boundary_margin:.1f}px)")
+                    else:
+                        # Use Poisson disk sampling (original behavior)
+                        self.updateMainStatus(f"[{roi_name}] Creating fiber distribution...")
+                        fiber_traj.initialize(
+                            shape=roi_shape,
+                            fiber_diameter=fiber_diameter,
+                            fiber_volume_fraction=volume_fraction,
+                            scale=1.0,
+                            seed=42 + hash(roi_name) % 1000,
+                            reference_vector=reference_vector
+                        )
+
+                    # Get resample settings
+                    resample_interval = self.trajectory_settings['resample_interval'] if self.trajectory_settings['resample'] else 0
+
+                    # Update status - Propagating trajectories
+                    self.updateMainStatus(f"[{roi_name}] Propagating trajectories...")
+
+                    # Propagate through structure tensor
+                    use_rk4 = 'RK4' in self.trajectory_settings.get('integration_method', 'Euler')
+
+                    # Use image-based tracking if enabled
+                    if use_detected_centers and fiber_detection_result is not None:
+                        all_slices = fiber_detection_result.get('all_slices', {})
+                        self.updateMainStatus(f"[{roi_name}] Propagating with image-based tracking (interval={detection_interval})...")
+
+                        # Get new fiber options
+                        add_new_fibers = self.trajectory_settings.get('add_new_fibers', False)
+                        new_fiber_interval = self.trajectory_settings.get('new_fiber_interval', 10)
+
+                        # Use propagate_with_detection method
+                        fiber_traj.propagate_with_detection(
+                            volume=roi_volume,
+                            structure_tensor=roi_structure_tensor,
+                            detection_interval=detection_interval,
+                            max_matching_distance=max_matching_distance,
+                            min_diameter=fiber_diameter * 0.5,
+                            max_diameter=fiber_diameter * 2.0,
+                            min_peak_distance=int(fiber_diameter * 0.4),
+                            relax=relax,
+                            relax_iterations=50,
+                            stop_at_boundary=True,
+                            boundary_margin=0.5,
+                            add_new_fibers=add_new_fibers,
+                            new_fiber_interval=new_fiber_interval
+                        )
+                    elif use_rk4:
+                        fiber_traj.propagate_rk4(
+                            roi_structure_tensor,
+                            relax=relax,
+                            relax_iterations=50,
+                            stop_at_boundary=True,
+                            resample_interval=resample_interval
+                        )
+                    else:
+                        fiber_traj.propagate(
+                            roi_structure_tensor,
+                            relax=relax,
+                            relax_iterations=50,
+                            stop_at_boundary=True,
+                            resample_interval=resample_interval
+                        )
+
+                    # Apply trajectory smoothing if enabled
+                    if self.trajectory_settings.get('smooth_trajectories', False):
+                        smooth_method = self.trajectory_settings.get('smooth_method', 'gaussian')
+                        smooth_sigma = self.trajectory_settings.get('smooth_sigma', 1.0)
+                        smooth_window = self.trajectory_settings.get('smooth_window', 5)
+                        self.updateMainStatus(f"[{roi_name}] Smoothing trajectories...")
+                        fiber_traj.smooth_trajectories(
+                            method=smooth_method,
+                            window_size=smooth_window,
+                            sigma=smooth_sigma
+                        )
+
+                    # Store with ROI offset information
+                    self.roi_trajectories[roi_name] = {
+                        'trajectory': fiber_traj,
+                        'offset': (z_min, y_min, x_min),
+                        'bounds': bounds,
+                        'volume': roi_volume,
+                        'structure_tensor': roi_structure_tensor
+                    }
+
+                    # Collect statistics
+                    total_fibers += fiber_traj.get_num_fibers()
+                    total_slices = max(total_slices, len(fiber_traj.trajectories))
+                    angles = fiber_traj.get_angles()
+                    if angles:
+                        all_angles_list.extend([np.concatenate(angles)])
+
+            # Update statistics
+            if all_angles_list:
+                all_angles = np.concatenate(all_angles_list)
+                stats_text = f"ROIs: {len(self.roi_trajectories)}\n"
+                stats_text += f"Total Fibers: {total_fibers}\n"
+                stats_text += f"Angle: {all_angles.mean():.2f}° ± {all_angles.std():.2f}°\n"
+                stats_text += f"Range: [{all_angles.min():.2f}°, {all_angles.max():.2f}°]"
+                self.stats_label.setText(stats_text)
+
+            # Use the first ROI's trajectory as the main one for backward compatibility
+            if self.roi_trajectories:
+                first_roi = list(self.roi_trajectories.keys())[0]
+                self.fiber_trajectory = self.roi_trajectories[first_roi]['trajectory']
+                self.volume_data = self.roi_trajectories[first_roi]['volume']
+        else:
+            # Fall back to using the global structure tensor
+            if self.structure_tensor is None:
+                self.updateMainStatus("Ready")
+                QMessageBox.warning(self, "Warning", "No structure tensor available.")
+                return
+
+            # Update status - Creating fiber distribution
+            self.updateMainStatus("Creating fiber distribution...")
+
+            # Create fiber trajectory object
+            self.fiber_trajectory = FiberTrajectory(
+                status_callback=lambda msg: self.updateMainStatus(msg)
+            )
+
+            # Use Poisson disk sampling
+            self.fiber_trajectory.initialize(
+                shape=self.volume_shape,
+                fiber_diameter=fiber_diameter,
+                fiber_volume_fraction=volume_fraction,
+                scale=1.0,
+                seed=42,
+                reference_vector=reference_vector
+            )
+
+            # Get resample settings
+            resample_interval = self.trajectory_settings['resample_interval'] if self.trajectory_settings['resample'] else 0
+
+            # Update status - Propagating trajectories
+            self.updateMainStatus("Propagating trajectories...")
+
+            use_rk4 = 'RK4' in self.trajectory_settings.get('integration_method', 'Euler')
+
+            if use_rk4:
+                self.fiber_trajectory.propagate_rk4(
+                    self.structure_tensor,
+                    relax=relax,
+                    relax_iterations=50,
+                    stop_at_boundary=True,
+                    resample_interval=resample_interval
+                )
+            else:
+                self.fiber_trajectory.propagate(
+                    self.structure_tensor,
+                    relax=relax,
+                    relax_iterations=50,
+                    stop_at_boundary=True,
+                    resample_interval=resample_interval
+                )
+
+            # Apply trajectory smoothing if enabled
+            if self.trajectory_settings.get('smooth_trajectories', False):
+                smooth_method = self.trajectory_settings.get('smooth_method', 'gaussian')
+                smooth_sigma = self.trajectory_settings.get('smooth_sigma', 1.0)
+                smooth_window = self.trajectory_settings.get('smooth_window', 5)
+                self.updateMainStatus("Smoothing trajectories...")
+                self.fiber_trajectory.smooth_trajectories(
+                    method=smooth_method,
+                    window_size=smooth_window,
+                    sigma=smooth_sigma
+                )
+
+            # Update statistics
+            angles = self.fiber_trajectory.get_angles()
+            if angles:
+                all_angles = np.concatenate(angles)
+                stats_text = f"Fibers: {self.fiber_trajectory.get_num_fibers()}\n"
+                stats_text += f"Slices: {len(self.fiber_trajectory.trajectories)}\n"
+                stats_text += f"Angle: {all_angles.mean():.2f}° ± {all_angles.std():.2f}°\n"
+                stats_text += f"Range: [{all_angles.min():.2f}°, {all_angles.max():.2f}°]"
+                self.stats_label.setText(stats_text)
+
+        self.export_screenshot_btn.setEnabled(True)
+        self.updateVisualization()
+
+        # Update status to complete
+        self.updateMainStatus("Ready")
+
+    def setCameraPreset(self, preset_name):
+        """Set the 3D camera to a preset view position."""
+        if not hasattr(self, 'plotter_3d') or self.plotter_3d is None:
+            return
+
+        # PyVista camera positions: 'xy', 'xz', 'yz', 'yx', 'zx', 'zy', 'iso'
+        preset_map = {
+            "Isometric": 'iso',
+            "Front (XY)": 'xy',
+            "Back (-XY)": '-xy',
+            "Right (YZ)": 'yz',
+            "Left (-YZ)": '-yz',
+            "Top (XZ)": 'xz',
+            "Bottom (-XZ)": '-xz'
+        }
+
+        if preset_name in preset_map:
+            # Use view_vector for negative directions
+            position = preset_map[preset_name]
+            if position.startswith('-'):
+                # Handle negative views using view_vector
+                self.plotter_3d.view_vector(*self._get_view_vector(position))
+            else:
+                self.plotter_3d.camera_position = position
+            self.plotter_3d.reset_camera()
+            self.plotter_3d.update()
+
+    def _get_view_vector(self, position):
+        """Get view vector and up vector for camera positioning."""
+        # Returns (view_direction, viewup)
+        vectors = {
+            '-xy': ((0, 0, -1), (0, 1, 0)),   # Looking from -Z towards +Z
+            '-yz': ((-1, 0, 0), (0, 0, 1)),   # Looking from -X towards +X
+            '-xz': ((0, -1, 0), (0, 0, 1)),   # Looking from -Y towards +Y
+        }
+        return vectors.get(position, ((0, 0, 1), (0, 1, 0)))
+
+    def resetCamera(self):
+        """Reset the 3D camera to fit all visible objects."""
+        if not hasattr(self, 'plotter_3d') or self.plotter_3d is None:
+            return
+        self.plotter_3d.reset_camera()
+        self.plotter_3d.update()
+
+    def togglePerspective(self, state):
+        """Toggle between perspective and parallel (orthographic) projection."""
+        if not hasattr(self, 'plotter_3d') or self.plotter_3d is None:
+            return
+        if state:
+            # Perspective projection
+            self.plotter_3d.camera.parallel_projection = False
+        else:
+            # Parallel (orthographic) projection
+            self.plotter_3d.camera.parallel_projection = True
+        self.plotter_3d.update()
+
+    def updateVisualization(self):
+        """Update all viewport visualizations."""
+        if self.fiber_trajectory is None:
+            return
+        self.update3DView()
+        self.updateSliceViews()
+
+    def update3DView(self):
+        """Update the 3D trajectory view using PyVista."""
+        # Clear previous actors
+        self.plotter_3d.clear()
+
+        # Fiber Trajectories mode
+        if self.fiber_trajectory is None and not self.roi_trajectories:
+            return
+
+        cmap = self.colormap_combo.currentText()
+        angle_min = self.trajectory_settings['tilt_min']
+        angle_max = self.trajectory_settings['tilt_max']
+        color_by_angle = self.trajectory_settings['color_by_angle']
+        color_by_fiber = self.trajectory_settings.get('color_by_fiber', False)
+        color_mode = self.color_mode_combo.currentText()
+        use_azimuth = "Azimuth" in color_mode
+
+        # Line width from slider
+        line_width = float(self.line_width_slider.value())
+
+        # Saturation range settings (for HSV azimuth mode)
+        sat_min = self.trajectory_settings['sat_min']
+        sat_max = self.trajectory_settings['sat_max']
+
+        # Colormap for fiber-based coloring
+        fiber_cmap = plt.get_cmap('tab20')
+
+        # Build all fiber trajectories as a single PolyData for efficiency
+        all_points = []
+        all_lines = []
+        all_angles_data = []
+        all_azimuths_data = []
+        all_fiber_indices = []  # track fiber index for color_by_fiber
+        point_offset = 0
+        global_bounds = None
+        global_fiber_idx = 0  # global fiber counter across all ROIs
+
+        # Process all ROI trajectories
+        trajectories_to_render = []
+        if self.roi_trajectories:
+            for roi_name, roi_data in self.roi_trajectories.items():
+                if not isinstance(roi_data, dict):
+                    continue
+                fiber_traj = roi_data['trajectory']
+                offset = roi_data['offset']  # (z_offset, y_offset, x_offset)
+                trajectories_to_render.append((fiber_traj, offset))
+
+                # Update global bounds
+                bounds = roi_data['bounds']
+                if global_bounds is None:
+                    global_bounds = list(bounds)
+                else:
+                    global_bounds[0] = min(global_bounds[0], bounds[0])
+                    global_bounds[1] = max(global_bounds[1], bounds[1])
+                    global_bounds[2] = min(global_bounds[2], bounds[2])
+                    global_bounds[3] = max(global_bounds[3], bounds[3])
+                    global_bounds[4] = min(global_bounds[4], bounds[4])
+                    global_bounds[5] = max(global_bounds[5], bounds[5])
+        elif self.fiber_trajectory is not None:
+            trajectories_to_render.append((self.fiber_trajectory, (0, 0, 0)))
+            bounds = self.fiber_trajectory.bounds
+            if bounds:
+                global_bounds = [0, bounds[0], 0, bounds[1], 0, bounds[2]]
+
+        for fiber_traj, offset in trajectories_to_render:
+            z_offset, y_offset, x_offset = offset
+
+            # Use per-fiber trajectories if available (variable length)
+            if hasattr(fiber_traj, 'fiber_trajectories') and fiber_traj.fiber_trajectories:
+                fiber_trajectories = fiber_traj.fiber_trajectories
+                fiber_angles_list = fiber_traj.fiber_angles if hasattr(fiber_traj, 'fiber_angles') else None
+                fiber_azimuths_list = getattr(fiber_traj, 'fiber_azimuths', None)
+
+                for fiber_idx, traj in enumerate(fiber_trajectories):
+                    if len(traj) < 2:
+                        continue
+
+                    fiber_points = []
+                    fiber_angles = []
+                    fiber_azimuths = []
+
+                    for i, (z, point) in enumerate(traj):
+                        x = point[0] + x_offset
+                        y = point[1] + y_offset
+                        z_global = z + z_offset
+                        fiber_points.append([x, y, z_global])
+
+                        if fiber_angles_list and fiber_idx < len(fiber_angles_list) and i < len(fiber_angles_list[fiber_idx]):
+                            fiber_angles.append(fiber_angles_list[fiber_idx][i])
+                        if fiber_azimuths_list and fiber_idx < len(fiber_azimuths_list) and i < len(fiber_azimuths_list[fiber_idx]):
+                            fiber_azimuths.append(fiber_azimuths_list[fiber_idx][i])
+
+                    n_pts = len(fiber_points)
+                    if n_pts < 2:
+                        continue
+
+                    all_points.extend(fiber_points)
+                    all_angles_data.extend(fiber_angles)
+                    all_azimuths_data.extend(fiber_azimuths)
+                    all_fiber_indices.extend([global_fiber_idx] * n_pts)  # same fiber index for all points
+                    global_fiber_idx += 1
+
+                    # Line connectivity: [n_points, idx0, idx1, idx2, ...]
+                    line = [n_pts] + list(range(point_offset, point_offset + n_pts))
+                    all_lines.extend(line)
+                    point_offset += n_pts
+            else:
+                # Fallback to old slice-based format
+                trajectories = fiber_traj.trajectories
+                angles = fiber_traj.angles
+                azimuths = getattr(fiber_traj, 'azimuths', angles)
+
+                if len(trajectories) < 2:
+                    continue
+
+                n_fibers = len(trajectories[0][1])
+
+                for fiber_idx in range(n_fibers):
+                    fiber_points = []
+                    fiber_angles = []
+                    fiber_azimuths = []
+
+                    for slice_idx, (z, slice_points) in enumerate(trajectories):
+                        x = slice_points[fiber_idx, 0] + x_offset
+                        y = slice_points[fiber_idx, 1] + y_offset
+                        z_global = z + z_offset
+                        fiber_points.append([x, y, z_global])
+
+                        if slice_idx < len(angles):
+                            fiber_angles.append(angles[slice_idx][fiber_idx])
+                        if slice_idx < len(azimuths):
+                            fiber_azimuths.append(azimuths[slice_idx][fiber_idx])
+
+                    n_pts = len(fiber_points)
+                    if n_pts < 2:
+                        continue
+
+                    all_points.extend(fiber_points)
+                    all_angles_data.extend(fiber_angles)
+                    all_azimuths_data.extend(fiber_azimuths)
+                    all_fiber_indices.extend([global_fiber_idx] * n_pts)  # same fiber index for all points
+                    global_fiber_idx += 1
+
+                    # Line connectivity: [n_points, idx0, idx1, idx2, ...]
+                    line = [n_pts] + list(range(point_offset, point_offset + n_pts))
+                    all_lines.extend(line)
+                    point_offset += n_pts
+
+        if not all_points:
+            return
+
+        # Create PolyData
+        points_array = np.array(all_points)
+        lines_array = np.array(all_lines)
+        poly = pv.PolyData(points_array, lines=lines_array)
+
+        if color_by_fiber and all_fiber_indices:
+            # Color each fiber with a unique color from tab20 colormap
+            fiber_indices_array = np.array(all_fiber_indices)
+            rgb_colors = np.zeros((len(fiber_indices_array), 3), dtype=np.uint8)
+            for i, idx in enumerate(fiber_indices_array):
+                r, g, b, _ = fiber_cmap(idx % 20 / 20.0)
+                rgb_colors[i] = [int(r * 255), int(g * 255), int(b * 255)]
+            poly['RGB'] = rgb_colors
+            self.plotter_3d.add_mesh(
+                poly,
+                scalars='RGB',
+                rgb=True,
+                line_width=line_width,
+                render_lines_as_tubes=True
+            )
+        elif color_by_angle:
+            if use_azimuth and all_azimuths_data:
+                # Use HSV coloring for azimuth with saturation based on tilt angle
+                azimuth_array = np.array(all_azimuths_data)
+                angles_array = np.array(all_angles_data) if all_angles_data else None
+                # Convert azimuth (0-360) to RGB using HSV
+                # Saturation is based on tilt angle with configurable range
+                rgb_colors = np.zeros((len(azimuth_array), 3), dtype=np.uint8)
+                for i, az in enumerate(azimuth_array):
+                    # Convert numpy azimuth to display coordinates
+                    # numpy: 90° = +Y (down in display), 270° = -Y (up in display)
+                    # display: 90° = up, 270° = down
+                    display_az = (360 - az) % 360
+                    hue = display_az / 360.0
+                    if angles_array is not None and i < len(angles_array):
+                        # Map tilt angle from [sat_min, sat_max] to [0, 1] saturation
+                        saturation = np.clip((angles_array[i] - sat_min) / (sat_max - sat_min + 1e-6), 0.0, 1.0)
+                    else:
+                        saturation = 1.0
+                    r, g, b = colorsys.hsv_to_rgb(hue, saturation, 1.0)
+                    rgb_colors[i] = [int(r * 255), int(g * 255), int(b * 255)]
+                poly['RGB'] = rgb_colors
+                self.plotter_3d.add_mesh(
+                    poly,
+                    scalars='RGB',
+                    rgb=True,
+                    line_width=line_width,
+                    render_lines_as_tubes=True
+                )
+            elif all_angles_data:
+                poly['angle'] = np.array(all_angles_data)
+                self.plotter_3d.add_mesh(
+                    poly,
+                    scalars='angle',
+                    cmap=cmap,
+                    clim=(angle_min, angle_max),
+                    line_width=line_width,
+                    render_lines_as_tubes=True,
+                    scalar_bar_args={'title': 'Angle (°)', 'n_labels': 5}
+                )
+            else:
+                self.plotter_3d.add_mesh(
+                    poly,
+                    color='blue',
+                    line_width=line_width,
+                    render_lines_as_tubes=True
+                )
+        else:
+            self.plotter_3d.add_mesh(
+                poly,
+                color='blue',
+                line_width=line_width,
+                render_lines_as_tubes=True
+            )
+
+        # Add domain boundary boxes for each ROI
+        if self.roi_trajectories:
+            roi_colors = ['red', 'green', 'blue', 'yellow', 'cyan', 'magenta']
+            for i, (roi_name, roi_data) in enumerate(self.roi_trajectories.items()):
+                bounds = roi_data['bounds']
+                z_min, z_max, y_min, y_max, x_min, x_max = bounds
+                box = pv.Box(bounds=(x_min, x_max, y_min, y_max, z_min, z_max))
+                color = roi_colors[i % len(roi_colors)]
+                self.plotter_3d.add_mesh(box, style='wireframe', color=color, line_width=2, label=roi_name)
+        elif global_bounds is not None:
+            box = pv.Box(bounds=(global_bounds[4], global_bounds[5],
+                                 global_bounds[2], global_bounds[3],
+                                 global_bounds[0], global_bounds[1]))
+            self.plotter_3d.add_mesh(box, style='wireframe', color='gray', line_width=1)
+
+        self.plotter_3d.add_axes()
+        self.plotter_3d.reset_camera()
+        self.plotter_3d.update()
+
+        # Show/hide color wheel legend based on azimuth mode
+        self._show_color_wheel_legend(use_azimuth and color_by_angle)
+
+    def updateSliceViews(self):
+        """Update the slice views with trajectory overlay (optimized)."""
+        from matplotlib.collections import EllipseCollection
+
+        if self.fiber_trajectory is None and not self.roi_trajectories:
+            return
+
+        try:
+            self._updateSliceViewsImpl()
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] updateSliceViews failed: {e}")
+            traceback.print_exc()
+
+    def _updateSliceViewsImpl(self):
+        """Internal implementation of updateSliceViews."""
+        from matplotlib.collections import EllipseCollection
+
+        cmap_name = self.colormap_combo.currentText()
+        angle_min = self.trajectory_settings['tilt_min']
+        angle_max = self.trajectory_settings['tilt_max']
+        color_by_angle = self.trajectory_settings['color_by_angle']
+        color_by_fiber = self.trajectory_settings.get('color_by_fiber', False)
+        color_mode = self.color_mode_combo.currentText()
+        use_azimuth = "Azimuth" in color_mode
+
+        # Saturation range settings (for HSV azimuth mode)
+        sat_min = self.trajectory_settings['sat_min']
+        sat_max = self.trajectory_settings['sat_max']
+
+        # CT overlay settings
+        show_ct = self.show_ct_check.isChecked()
+        ct_alpha = self.ct_opacity_slider.value() / 100.0
+
+        # Fiber diameter circle settings
+        show_fiber_diameter = self.trajectory_settings['show_fiber_diameter']
+
+        # Get colormap for tilt angle mode
+        cmap = plt.get_cmap(cmap_name)
+
+        # Colormap for fiber-based coloring (use tab20 for distinct colors)
+        fiber_cmap = plt.get_cmap('tab20')
+
+        # Vectorized color computation for tilt angles
+        def angles_to_colors(angles_arr, fiber_indices=None):
+            if color_by_fiber and fiber_indices is not None:
+                # Each fiber gets a unique color based on its index
+                n_fibers = len(fiber_indices)
+                colors = np.zeros((n_fibers, 4))
+                for i, idx in enumerate(fiber_indices):
+                    colors[i] = fiber_cmap(idx % 20 / 20.0)
+                return colors
+            if not color_by_angle:
+                return np.full((len(angles_arr), 4), [0, 0, 1, 1])  # blue
+            norm_angles = np.clip((angles_arr - angle_min) / (angle_max - angle_min + 1e-6), 0, 1)
+            return cmap(norm_angles)
+
+        # Vectorized color computation for azimuth (HSV)
+        def azimuths_to_colors(azimuths_arr, tilts_arr, fiber_indices=None):
+            if color_by_fiber and fiber_indices is not None:
+                # Each fiber gets a unique color based on its index
+                n_fibers = len(fiber_indices)
+                colors = np.zeros((n_fibers, 3))
+                for i, idx in enumerate(fiber_indices):
+                    colors[i] = fiber_cmap(idx % 20 / 20.0)[:3]
+                return colors
+            if not color_by_angle:
+                return np.full((len(azimuths_arr), 3), [0, 0, 1])  # blue
+            # Convert numpy azimuth to display coordinates
+            display_azimuths = (360 - azimuths_arr) % 360
+            hues = display_azimuths / 360.0
+            # Map tilt angle from [sat_min, sat_max] to [0, 1] saturation
+            saturations = np.clip((tilts_arr - sat_min) / (sat_max - sat_min + 1e-6), 0.0, 1.0)
+            # HSV to RGB conversion (vectorized)
+            colors = np.zeros((len(azimuths_arr), 3))
+            for i in range(len(azimuths_arr)):
+                colors[i] = colorsys.hsv_to_rgb(hues[i], saturations[i], 1.0)
+            return colors
+
+        # Get global bounds from main window volume if available
+        global_volume = None
+        if self.main_window and hasattr(self.main_window, 'current_volume') and self.main_window.current_volume is not None:
+            global_volume = self.main_window.current_volume
+
+        z_pos = self.current_slice['z']
+        y_pos = self.current_slice['y']
+        x_pos = self.current_slice['x']
+
+        # Prepare axes
+        canvas_xy = self.viewport_frames[1]['canvas']
+        ax_xy = canvas_xy.axes
+        ax_xy.clear()
+        ax_xy.set_facecolor('#2a2a2a')
+        ax_xy.set_title(f'XY Slice at Z={z_pos}', color='white', fontsize=10)
+        ax_xy.set_xlabel('X', color='white', fontsize=8)
+        ax_xy.set_ylabel('Y', color='white', fontsize=8)
+        ax_xy.tick_params(colors='white', labelsize=8)
+
+        canvas_xz = self.viewport_frames[2]['canvas']
+        ax_xz = canvas_xz.axes
+        ax_xz.clear()
+        ax_xz.set_facecolor('#2a2a2a')
+        ax_xz.set_title(f'XZ Slice at Y={y_pos}', color='white', fontsize=10)
+        ax_xz.set_xlabel('X', color='white', fontsize=8)
+        ax_xz.set_ylabel('Z', color='white', fontsize=8)
+        ax_xz.tick_params(colors='white', labelsize=8)
+
+        canvas_yz = self.viewport_frames[3]['canvas']
+        ax_yz = canvas_yz.axes
+        ax_yz.clear()
+        ax_yz.set_facecolor('#2a2a2a')
+        ax_yz.set_title(f'YZ Slice at X={x_pos}', color='white', fontsize=10)
+        ax_yz.set_xlabel('Y', color='white', fontsize=8)
+        ax_yz.set_ylabel('Z', color='white', fontsize=8)
+        ax_yz.tick_params(colors='white', labelsize=8)
+
+        # Show CT images from global volume or ROI volumes
+        if show_ct:
+            if global_volume is not None:
+                # Use global volume
+                if z_pos < global_volume.shape[0]:
+                    ct_slice = global_volume[z_pos, :, :]
+                    ax_xy.imshow(ct_slice, cmap='gray', alpha=ct_alpha, origin='lower',
+                                extent=[0, ct_slice.shape[1], 0, ct_slice.shape[0]])
+                if y_pos < global_volume.shape[1]:
+                    ct_slice = global_volume[:, y_pos, :]
+                    ax_xz.imshow(ct_slice, cmap='gray', alpha=ct_alpha, origin='lower',
+                                extent=[0, ct_slice.shape[1], 0, ct_slice.shape[0]], aspect='auto')
+                if x_pos < global_volume.shape[2]:
+                    ct_slice = global_volume[:, :, x_pos]
+                    ax_yz.imshow(ct_slice, cmap='gray', alpha=ct_alpha, origin='lower',
+                                extent=[0, ct_slice.shape[1], 0, ct_slice.shape[0]], aspect='auto')
+            elif self.roi_trajectories:
+                # Use ROI volumes when global volume is not available
+                for roi_name, roi_data in self.roi_trajectories.items():
+                    if not isinstance(roi_data, dict):
+                        continue
+                    roi_volume = roi_data.get('volume', None)
+                    if roi_volume is None:
+                        continue
+                    offset = roi_data['offset']  # (z_offset, y_offset, x_offset)
+                    z_offset, y_offset, x_offset = offset
+
+                    # XY slice - check if z_pos is within this ROI
+                    roi_z_pos = z_pos - z_offset
+                    if 0 <= roi_z_pos < roi_volume.shape[0]:
+                        ct_slice = roi_volume[roi_z_pos, :, :]
+                        ax_xy.imshow(ct_slice, cmap='gray', alpha=ct_alpha, origin='lower',
+                                    extent=[x_offset, x_offset + ct_slice.shape[1],
+                                           y_offset, y_offset + ct_slice.shape[0]])
+
+                    # XZ slice - check if y_pos is within this ROI
+                    roi_y_pos = y_pos - y_offset
+                    if 0 <= roi_y_pos < roi_volume.shape[1]:
+                        ct_slice = roi_volume[:, roi_y_pos, :]
+                        ax_xz.imshow(ct_slice, cmap='gray', alpha=ct_alpha, origin='lower',
+                                    extent=[x_offset, x_offset + ct_slice.shape[1],
+                                           z_offset, z_offset + ct_slice.shape[0]], aspect='auto')
+
+                    # YZ slice - check if x_pos is within this ROI
+                    roi_x_pos = x_pos - x_offset
+                    if 0 <= roi_x_pos < roi_volume.shape[2]:
+                        ct_slice = roi_volume[:, :, roi_x_pos]
+                        ax_yz.imshow(ct_slice, cmap='gray', alpha=ct_alpha, origin='lower',
+                                    extent=[y_offset, y_offset + ct_slice.shape[1],
+                                           z_offset, z_offset + ct_slice.shape[0]], aspect='auto')
+
+        tolerance = 5.0  # pixels
+
+        # Helper to draw circles using EllipseCollection (batch rendering)
+        def draw_circles_batch(ax, centers, radius, transform=None):
+            if len(centers) == 0:
+                return
+            widths = np.full(len(centers), radius * 2)
+            heights = np.full(len(centers), radius * 2)
+            offsets = np.array(centers)
+            ec = EllipseCollection(
+                widths, heights, np.zeros(len(centers)),
+                units='x', offsets=offsets, transOffset=ax.transData,
+                facecolors='none', edgecolors='red', linewidths=0.5
+            )
+            ax.add_collection(ec)
+
+        # Render trajectories for all ROIs
+        if self.roi_trajectories:
+            for roi_name, roi_data in self.roi_trajectories.items():
+                if not isinstance(roi_data, dict):
+                    continue
+                fiber_traj = roi_data['trajectory']
+                offset = roi_data['offset']  # (z_offset, y_offset, x_offset)
+                z_offset, y_offset, x_offset = offset
+                trajectories = fiber_traj.trajectories
+                angles = fiber_traj.angles if fiber_traj.angles else []
+                azimuths = getattr(fiber_traj, 'azimuths', None)
+                if azimuths is None or len(azimuths) == 0:
+                    azimuths = angles  # fallback to angles if azimuths not available
+
+                # Get ROI bounds for range checking
+                bounds = roi_data.get('bounds', None)
+                if bounds:
+                    roi_z_min, roi_z_max, roi_y_min, roi_y_max, roi_x_min, roi_x_max = bounds
+                    roi_height = roi_y_max - roi_y_min
+                    roi_width = roi_x_max - roi_x_min
+                else:
+                    roi_height = roi_width = 1000  # fallback
+
+                # Get propagation axis and fiber diameter for circle rendering
+                prop_axis = getattr(fiber_traj, 'propagation_axis', 2)
+                fiber_diameter = getattr(fiber_traj, 'fiber_diameter', 7.0)
+                radius = fiber_diameter / 2.0
+
+                # XY Slice - find trajectory slice at z_pos (relative to ROI)
+                roi_z_pos = z_pos - z_offset
+                if 0 <= roi_z_pos < len(trajectories):
+                    z, points = trajectories[roi_z_pos]
+                    n_points = len(points)
+                    # Ensure angles array has correct length (may differ when new fibers are added dynamically)
+                    if roi_z_pos < len(angles) and len(angles[roi_z_pos]) == n_points:
+                        slice_angles = np.array(angles[roi_z_pos])
+                    else:
+                        slice_angles = np.zeros(n_points)
+                    fiber_indices = np.arange(n_points)  # fiber index for each point
+                    # Ensure azimuths array has correct length for azimuth mode
+                    if use_azimuth:
+                        if roi_z_pos < len(azimuths) and len(azimuths[roi_z_pos]) == n_points:
+                            slice_azimuths = np.array(azimuths[roi_z_pos])
+                        else:
+                            slice_azimuths = np.zeros(n_points)
+                        colors = azimuths_to_colors(slice_azimuths, slice_angles, fiber_indices)
+                    else:
+                        colors = angles_to_colors(slice_angles, fiber_indices)
+                    ax_xy.scatter(points[:, 0] + x_offset, points[:, 1] + y_offset, c=colors, s=4, alpha=0.8)
+                    if show_fiber_diameter and prop_axis == 2:
+                        centers = [(pt[0] + x_offset, pt[1] + y_offset) for pt in points]
+                        draw_circles_batch(ax_xy, centers, radius)
+
+                # XZ Slice - collect all points near y_pos in one pass
+                roi_y_pos = y_pos - y_offset
+                xz_x_all, xz_z_all, xz_angles_all, xz_azimuths_all = [], [], [], []
+                xz_fiber_indices_all = []  # track fiber indices for color_by_fiber
+                xz_circle_centers = []
+
+                # Only process if y_pos is within ROI range
+                if 0 <= roi_y_pos < roi_height + tolerance:
+                    for slice_idx, (z, points) in enumerate(trajectories):
+                        mask = np.abs(points[:, 1] - roi_y_pos) < tolerance
+                        if np.any(mask):
+                            matched_indices = np.where(mask)[0]
+                            n_matched = len(matched_indices)
+                            xz_x_all.extend(points[mask, 0] + x_offset)
+                            xz_z_all.extend(np.full(n_matched, slice_idx + z_offset))
+                            # Ensure angles array has correct length
+                            if slice_idx < len(angles) and len(angles[slice_idx]) == len(points):
+                                xz_angles_all.extend(np.array(angles[slice_idx])[mask])
+                            else:
+                                xz_angles_all.extend(np.zeros(n_matched))
+                            xz_fiber_indices_all.extend(matched_indices)
+                            # Ensure azimuths array has correct length for azimuth mode
+                            if use_azimuth:
+                                if slice_idx < len(azimuths) and len(azimuths[slice_idx]) == len(points):
+                                    xz_azimuths_all.extend(np.array(azimuths[slice_idx])[mask])
+                                else:
+                                    xz_azimuths_all.extend(np.zeros(n_matched))
+                            if show_fiber_diameter and prop_axis == 1:
+                                xz_circle_centers.extend([(pt[0] + x_offset, slice_idx + z_offset) for pt in points[mask]])
+
+                if xz_x_all:
+                    xz_x_all = np.array(xz_x_all)
+                    xz_z_all = np.array(xz_z_all)
+                    xz_angles_all = np.array(xz_angles_all)
+                    xz_fiber_indices_all = np.array(xz_fiber_indices_all)
+                    # Ensure all arrays have the same length
+                    n_points = len(xz_x_all)
+                    if use_azimuth and len(xz_azimuths_all) == n_points:
+                        xz_azimuths_all = np.array(xz_azimuths_all)
+                        colors = azimuths_to_colors(xz_azimuths_all, xz_angles_all, xz_fiber_indices_all)
+                    else:
+                        colors = angles_to_colors(xz_angles_all, xz_fiber_indices_all)
+                    ax_xz.scatter(xz_x_all, xz_z_all, c=colors, s=2, alpha=0.6)
+                    if xz_circle_centers:
+                        draw_circles_batch(ax_xz, xz_circle_centers, radius)
+
+                # YZ Slice - collect all points near x_pos in one pass
+                roi_x_pos = x_pos - x_offset
+                yz_y_all, yz_z_all, yz_angles_all, yz_azimuths_all = [], [], [], []
+                yz_fiber_indices_all = []  # track fiber indices for color_by_fiber
+                yz_circle_centers = []
+                # Only process if x_pos is within ROI range
+                if 0 <= roi_x_pos < roi_width + tolerance:
+                    for slice_idx, (z, points) in enumerate(trajectories):
+                        mask = np.abs(points[:, 0] - roi_x_pos) < tolerance
+                        if np.any(mask):
+                            matched_indices = np.where(mask)[0]
+                            n_matched = len(matched_indices)
+                            yz_y_all.extend(points[mask, 1] + y_offset)
+                            yz_z_all.extend(np.full(n_matched, slice_idx + z_offset))
+                            # Ensure angles array has correct length
+                            if slice_idx < len(angles) and len(angles[slice_idx]) == len(points):
+                                yz_angles_all.extend(np.array(angles[slice_idx])[mask])
+                            else:
+                                yz_angles_all.extend(np.zeros(n_matched))
+                            yz_fiber_indices_all.extend(matched_indices)
+                            # Ensure azimuths array has correct length for azimuth mode
+                            if use_azimuth:
+                                if slice_idx < len(azimuths) and len(azimuths[slice_idx]) == len(points):
+                                    yz_azimuths_all.extend(np.array(azimuths[slice_idx])[mask])
+                                else:
+                                    yz_azimuths_all.extend(np.zeros(n_matched))
+                            if show_fiber_diameter and prop_axis == 0:
+                                yz_circle_centers.extend([(pt[1] + y_offset, slice_idx + z_offset) for pt in points[mask]])
+
+                if yz_y_all:
+                    yz_y_all = np.array(yz_y_all)
+                    yz_z_all = np.array(yz_z_all)
+                    yz_angles_all = np.array(yz_angles_all)
+                    yz_fiber_indices_all = np.array(yz_fiber_indices_all)
+                    # Ensure all arrays have the same length
+                    n_points = len(yz_y_all)
+                    if use_azimuth and len(yz_azimuths_all) == n_points:
+                        yz_azimuths_all = np.array(yz_azimuths_all)
+                        colors = azimuths_to_colors(yz_azimuths_all, yz_angles_all, yz_fiber_indices_all)
+                    else:
+                        colors = angles_to_colors(yz_angles_all, yz_fiber_indices_all)
+                    ax_yz.scatter(yz_y_all, yz_z_all, c=colors, s=2, alpha=0.6)
+                    if yz_circle_centers:
+                        draw_circles_batch(ax_yz, yz_circle_centers, radius)
+
+        elif self.fiber_trajectory is not None:
+            # Fall back to single trajectory rendering
+            trajectories = self.fiber_trajectory.trajectories
+            angles = self.fiber_trajectory.angles if self.fiber_trajectory.angles else []
+            azimuths = getattr(self.fiber_trajectory, 'azimuths', None)
+            if azimuths is None or len(azimuths) == 0:
+                azimuths = angles  # fallback to angles if azimuths not available
+
+            prop_axis = getattr(self.fiber_trajectory, 'propagation_axis', 2)
+            fiber_diameter = getattr(self.fiber_trajectory, 'fiber_diameter', 7.0)
+            radius = fiber_diameter / 2.0
+
+            if z_pos < len(trajectories):
+                z, points = trajectories[z_pos]
+                n_points = len(points)
+                # Ensure angles array has correct length
+                if z_pos < len(angles) and len(angles[z_pos]) == n_points:
+                    slice_angles = np.array(angles[z_pos])
+                else:
+                    slice_angles = np.zeros(n_points)
+                fiber_indices = np.arange(n_points)  # fiber index for each point
+                # Ensure azimuths array has correct length for azimuth mode
+                if use_azimuth:
+                    if z_pos < len(azimuths) and len(azimuths[z_pos]) == n_points:
+                        slice_azimuths = np.array(azimuths[z_pos])
+                    else:
+                        slice_azimuths = np.zeros(n_points)
+                    colors = azimuths_to_colors(slice_azimuths, slice_angles, fiber_indices)
+                else:
+                    colors = angles_to_colors(slice_angles, fiber_indices)
+                ax_xy.scatter(points[:, 0], points[:, 1], c=colors, s=4, alpha=0.8)
+                if show_fiber_diameter and prop_axis == 2:
+                    centers = [(pt[0], pt[1]) for pt in points]
+                    draw_circles_batch(ax_xy, centers, radius)
+
+            # XZ Slice - batch collection
+            xz_x_all, xz_z_all, xz_angles_all, xz_azimuths_all = [], [], [], []
+            xz_fiber_indices_all = []
+            xz_circle_centers = []
+            for slice_idx, (z, points) in enumerate(trajectories):
+                mask = np.abs(points[:, 1] - y_pos) < tolerance
+                if np.any(mask):
+                    matched_indices = np.where(mask)[0]
+                    n_matched = len(matched_indices)
+                    xz_x_all.extend(points[mask, 0])
+                    xz_z_all.extend(np.full(n_matched, slice_idx))
+                    # Ensure angles array has correct length
+                    if slice_idx < len(angles) and len(angles[slice_idx]) == len(points):
+                        xz_angles_all.extend(np.array(angles[slice_idx])[mask])
+                    else:
+                        xz_angles_all.extend(np.zeros(n_matched))
+                    xz_fiber_indices_all.extend(matched_indices)
+                    # Ensure azimuths array has correct length for azimuth mode
+                    if use_azimuth:
+                        if slice_idx < len(azimuths) and len(azimuths[slice_idx]) == len(points):
+                            xz_azimuths_all.extend(np.array(azimuths[slice_idx])[mask])
+                        else:
+                            xz_azimuths_all.extend(np.zeros(n_matched))
+                    if show_fiber_diameter and prop_axis == 1:
+                        xz_circle_centers.extend([(pt[0], slice_idx) for pt in points[mask]])
+
+            if xz_x_all:
+                xz_x_all = np.array(xz_x_all)
+                xz_z_all = np.array(xz_z_all)
+                xz_angles_all = np.array(xz_angles_all)
+                xz_fiber_indices_all = np.array(xz_fiber_indices_all)
+                # Ensure all arrays have the same length
+                n_points = len(xz_x_all)
+                if use_azimuth and len(xz_azimuths_all) == n_points:
+                    xz_azimuths_all = np.array(xz_azimuths_all)
+                    colors = azimuths_to_colors(xz_azimuths_all, xz_angles_all, xz_fiber_indices_all)
+                else:
+                    colors = angles_to_colors(xz_angles_all, xz_fiber_indices_all)
+                ax_xz.scatter(xz_x_all, xz_z_all, c=colors, s=2, alpha=0.6)
+                if xz_circle_centers:
+                    draw_circles_batch(ax_xz, xz_circle_centers, radius)
+
+            # YZ Slice - batch collection
+            yz_y_all, yz_z_all, yz_angles_all, yz_azimuths_all = [], [], [], []
+            yz_fiber_indices_all = []
+            yz_circle_centers = []
+            for slice_idx, (z, points) in enumerate(trajectories):
+                mask = np.abs(points[:, 0] - x_pos) < tolerance
+                if np.any(mask):
+                    matched_indices = np.where(mask)[0]
+                    n_matched = len(matched_indices)
+                    yz_y_all.extend(points[mask, 1])
+                    yz_z_all.extend(np.full(n_matched, slice_idx))
+                    # Ensure angles array has correct length
+                    if slice_idx < len(angles) and len(angles[slice_idx]) == len(points):
+                        yz_angles_all.extend(np.array(angles[slice_idx])[mask])
+                    else:
+                        yz_angles_all.extend(np.zeros(n_matched))
+                    yz_fiber_indices_all.extend(matched_indices)
+                    # Ensure azimuths array has correct length for azimuth mode
+                    if use_azimuth:
+                        if slice_idx < len(azimuths) and len(azimuths[slice_idx]) == len(points):
+                            yz_azimuths_all.extend(np.array(azimuths[slice_idx])[mask])
+                        else:
+                            yz_azimuths_all.extend(np.zeros(n_matched))
+                    if show_fiber_diameter and prop_axis == 0:
+                        yz_circle_centers.extend([(pt[1], slice_idx) for pt in points[mask]])
+
+            if yz_y_all:
+                yz_y_all = np.array(yz_y_all)
+                yz_z_all = np.array(yz_z_all)
+                yz_angles_all = np.array(yz_angles_all)
+                yz_fiber_indices_all = np.array(yz_fiber_indices_all)
+                # Ensure all arrays have the same length
+                n_points = len(yz_y_all)
+                if use_azimuth and len(yz_azimuths_all) == n_points:
+                    yz_azimuths_all = np.array(yz_azimuths_all)
+                    colors = azimuths_to_colors(yz_azimuths_all, yz_angles_all, yz_fiber_indices_all)
+                else:
+                    colors = angles_to_colors(yz_angles_all, yz_fiber_indices_all)
+                ax_yz.scatter(yz_y_all, yz_z_all, c=colors, s=2, alpha=0.6)
+                if yz_circle_centers:
+                    draw_circles_batch(ax_yz, yz_circle_centers, radius)
+
+        # Set axis limits based on global volume
+        if global_volume is not None:
+            ax_xy.set_xlim(0, global_volume.shape[2])
+            ax_xy.set_ylim(0, global_volume.shape[1])
+            ax_xz.set_xlim(0, global_volume.shape[2])
+            ax_xz.set_ylim(0, global_volume.shape[0])
+            ax_yz.set_xlim(0, global_volume.shape[1])
+            ax_yz.set_ylim(0, global_volume.shape[0])
+
+        ax_xy.set_aspect('equal')
+        ax_xz.set_aspect('equal')
+        ax_yz.set_aspect('equal')
+
+        canvas_xy.draw()
+        canvas_xz.draw()
+        canvas_yz.draw()
+
+    def openSettingsDialog(self):
+        """Open fiber trajectory settings dialog."""
+        dialog = FiberTrajectorySettingsDialog(self, self.trajectory_settings)
+        if dialog.exec() == QDialog.Accepted:
+            self.trajectory_settings = dialog.getSettings()
+            # Update slice views if show_fiber_diameter changed
+            self.updateSliceViews()
+
+    def showExportScreenshotDialog(self):
+        """Show export screenshot dialog."""
+        dialog = ExportScreenshotDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            self.exportScreenshot(dialog.getSettings())
+
+    def exportScreenshot(self, settings):
+        """Export screenshot with specified settings."""
+        view_type = settings['view']
+        bg_color = settings['background']
+        include_ct = settings['include_ct']
+        resolution = settings.get('resolution', (1280, 960))
+        include_legend = settings.get('include_legend', True)
+
+        # Get save filename
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Screenshot", "",
+            "PNG Files (*.png);;JPEG Files (*.jpg);;All Files (*)"
+        )
+        if not filename:
+            return
+
+        # Ensure extension
+        if not filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+            filename += '.png'
+
+        try:
+            if view_type == '3D View':
+                self._export_3d_screenshot(filename, bg_color, resolution, include_legend)
+            else:
+                self._export_slice_screenshot(filename, view_type, bg_color, include_ct, resolution, include_legend)
+            QMessageBox.information(self, "Success", f"Screenshot saved to:\n{filename}")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to save screenshot:\n{str(e)}")
+
+    def _export_3d_screenshot(self, filename, bg_color, resolution, include_legend=True):
+        """Export 3D view screenshot."""
+        import matplotlib.pyplot as plt
+        from PIL import Image
+        import io
+
+        # Set background color
+        if bg_color == 'White':
+            self.plotter_3d.set_background('white')
+            text_color = 'black'
+        elif bg_color == 'Gray':
+            self.plotter_3d.set_background('#808080')
+            text_color = 'white'
+        else:  # Transparent
+            self.plotter_3d.set_background('white')
+            text_color = 'black'
+
+        # Take screenshot with specified resolution
+        screenshot_array = self.plotter_3d.screenshot(
+            transparent_background=(bg_color == 'Transparent'),
+            window_size=resolution,
+            return_img=True
+        )
+
+        # Restore original background
+        self.plotter_3d.set_background('#2a2a2a')
+
+        # Check if we need to add color legend
+        color_by_angle = self.trajectory_settings['color_by_angle']
+        color_mode = self.color_mode_combo.currentText()
+        use_azimuth = "Azimuth" in color_mode
+
+        if include_legend and color_by_angle and use_azimuth:
+            # Add color wheel to the screenshot using PIL/matplotlib
+            self._add_color_wheel_to_3d_screenshot(screenshot_array, filename, text_color, bg_color)
+        elif include_legend and color_by_angle and not use_azimuth:
+            # Add colorbar for tilt mode
+            cmap_name = self.colormap_combo.currentText()
+            angle_min = self.trajectory_settings['tilt_min']
+            angle_max = self.trajectory_settings['tilt_max']
+            self._add_colorbar_to_3d_screenshot(screenshot_array, filename, text_color, bg_color, cmap_name, angle_min, angle_max)
+        else:
+            # Save directly without legend
+            img = Image.fromarray(screenshot_array)
+            img.save(filename)
+
+    def _export_slice_screenshot(self, filename, view_type, bg_color, include_ct, resolution, include_legend=True):
+        """Export slice view screenshot."""
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Circle
+
+        # Map view type to viewport index
+        view_map = {'XY Slice': 1, 'XZ Slice': 2, 'YZ Slice': 3}
+        viewport_idx = view_map.get(view_type, 1)
+
+        # Determine background color
+        transparent = False
+        if bg_color == 'White':
+            face_color = 'white'
+            text_color = 'black'
+        elif bg_color == 'Gray':
+            face_color = '#808080'
+            text_color = 'white'
+        else:  # Transparent
+            face_color = 'white'
+            text_color = 'black'
+            transparent = True
+
+        # If resolution is None (Current View), save directly from canvas
+        if resolution is None:
+            if viewport_idx < len(self.viewport_frames):
+                canvas = self.viewport_frames[viewport_idx]['canvas']
+                if canvas and hasattr(canvas, 'figure'):
+                    fig = canvas.figure
+
+                    # Store original colors
+                    original_facecolor = fig.get_facecolor()
+                    original_ax_colors = []
+                    original_ax_patch_colors = []
+
+                    # Set background for saving
+                    if transparent:
+                        # For transparent, set figure background to transparent
+                        fig.set_facecolor('none')
+                        for ax in fig.get_axes():
+                            original_ax_colors.append(ax.get_facecolor())
+                            original_ax_patch_colors.append(ax.patch.get_facecolor())
+                            ax.set_facecolor('none')
+                            ax.patch.set_facecolor('none')
+                    else:
+                        fig.set_facecolor(face_color)
+                        for ax in fig.get_axes():
+                            original_ax_colors.append(ax.get_facecolor())
+                            original_ax_patch_colors.append(ax.patch.get_facecolor())
+                            ax.set_facecolor(face_color)
+                            ax.patch.set_facecolor(face_color)
+
+                    # Save without bbox_inches='tight' to preserve axis labels
+                    fig.savefig(filename, facecolor=fig.get_facecolor(),
+                               edgecolor='none', transparent=transparent)
+
+                    # Restore original background
+                    fig.set_facecolor(original_facecolor)
+                    for ax, orig_color, orig_patch in zip(fig.get_axes(), original_ax_colors, original_ax_patch_colors):
+                        ax.set_facecolor(orig_color)
+                        ax.patch.set_facecolor(orig_patch)
+                    canvas.draw()
+                    return
+
+        # Calculate figure size based on resolution (use 100 dpi)
+        dpi = 100
+        fig_width = resolution[0] / dpi
+        fig_height = resolution[1] / dpi
+
+        # Create figure with appropriate background and resolution
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor=face_color, dpi=dpi)
+        ax.set_facecolor(face_color if face_color != 'none' else 'white')
+
+        # Get current slice positions
+        z_pos = self.current_slice['z']
+        y_pos = self.current_slice['y']
+        x_pos = self.current_slice['x']
+
+        # Get visualization settings
+        color_by_angle = self.trajectory_settings['color_by_angle']
+        color_mode = self.color_mode_combo.currentText()
+        use_azimuth = "Azimuth" in color_mode
+        cmap_name = self.colormap_combo.currentText()
+        angle_min = self.trajectory_settings['tilt_min']
+        angle_max = self.trajectory_settings['tilt_max']
+        sat_min = self.trajectory_settings['sat_min']
+        sat_max = self.trajectory_settings['sat_max']
+        show_fiber_diameter = self.trajectory_settings['show_fiber_diameter']
+
+        cmap = plt.get_cmap(cmap_name)
+
+        def angle_to_color(angle):
+            if not color_by_angle:
+                return 'blue'
+            norm_angle = np.clip((angle - angle_min) / (angle_max - angle_min + 1e-6), 0, 1)
+            return cmap(norm_angle)
+
+        def azimuth_to_color(azimuth, tilt_angle=None):
+            if not color_by_angle:
+                return 'blue'
+            # Convert numpy azimuth to display azimuth (Y-axis flip compensation)
+            display_az = (360 - azimuth) % 360
+            hue = display_az / 360.0
+            # Use tilt angle for saturation with configurable range
+            if tilt_angle is not None:
+                saturation = np.clip((tilt_angle - sat_min) / (sat_max - sat_min + 1e-6), 0.0, 1.0)
+            else:
+                saturation = 1.0
+            r, g, b = colorsys.hsv_to_rgb(hue, saturation, 1.0)
+            return (r, g, b)
+
+        # Determine which slice to export
+        if view_type == 'XY Slice':
+            slice_idx = z_pos
+            if include_ct and self.main_window and self.main_window.viewer and self.main_window.viewer.current_volume is not None:
+                vol = self.main_window.viewer.current_volume
+                if slice_idx < vol.shape[0]:
+                    ax.imshow(vol[slice_idx], cmap='gray', origin='lower', alpha=0.7)
+
+            # Plot fiber points
+            self._plot_xy_slice_for_export(ax, z_pos, use_azimuth, angle_to_color, azimuth_to_color, show_fiber_diameter)
+            ax.set_xlabel('X', color=text_color)
+            ax.set_ylabel('Y', color=text_color)
+            ax.set_title(f'XY Slice (Z={slice_idx})', color=text_color)
+
+        elif view_type == 'XZ Slice':
+            slice_idx = y_pos
+            if include_ct and self.main_window and self.main_window.viewer and self.main_window.viewer.current_volume is not None:
+                vol = self.main_window.viewer.current_volume
+                if slice_idx < vol.shape[1]:
+                    ax.imshow(vol[:, slice_idx, :].T, cmap='gray', origin='lower', aspect='auto', alpha=0.7)
+
+            self._plot_xz_slice_for_export(ax, y_pos, use_azimuth, angle_to_color, azimuth_to_color, show_fiber_diameter)
+            ax.set_xlabel('Z', color=text_color)
+            ax.set_ylabel('X', color=text_color)
+            ax.set_title(f'XZ Slice (Y={slice_idx})', color=text_color)
+
+        elif view_type == 'YZ Slice':
+            slice_idx = x_pos
+            if include_ct and self.main_window and self.main_window.viewer and self.main_window.viewer.current_volume is not None:
+                vol = self.main_window.viewer.current_volume
+                if slice_idx < vol.shape[2]:
+                    ax.imshow(vol[:, :, slice_idx].T, cmap='gray', origin='lower', aspect='auto', alpha=0.7)
+
+            self._plot_yz_slice_for_export(ax, x_pos, use_azimuth, angle_to_color, azimuth_to_color, show_fiber_diameter)
+            ax.set_xlabel('Z', color=text_color)
+            ax.set_ylabel('Y', color=text_color)
+            ax.set_title(f'YZ Slice (X={slice_idx})', color=text_color)
+
+        ax.tick_params(colors=text_color)
+        ax.set_aspect('equal')
+
+        # Add color legend if requested
+        if include_legend and color_by_angle:
+            if use_azimuth:
+                # Add color wheel legend for azimuth mode
+                self._add_color_wheel_to_export(fig, ax, text_color)
+            else:
+                # Add colorbar for tilt angle mode
+                self._add_colorbar_to_export(fig, ax, cmap, angle_min, angle_max, text_color)
+
+        # Save with transparency if requested
+        plt.savefig(filename, dpi=150, bbox_inches='tight',
+                   transparent=(bg_color == 'Transparent'),
+                   facecolor=face_color if face_color != 'none' else 'white')
+        plt.close(fig)
+
+    def _add_color_wheel_to_export(self, fig, ax, text_color):
+        """Add color wheel legend to export figure for azimuth mode using the existing color wheel."""
+        from matplotlib.patches import Wedge
+        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+        # Create inset axes for color wheel in bottom-right corner
+        ax_inset = inset_axes(ax, width="15%", height="15%", loc='lower right',
+                              borderpad=1.0)
+
+        # Use the same drawing parameters as _create_color_wheel_legend
+        n_seg = 72  # Number of angular segments
+        n_rad = 15  # Number of radial segments for saturation
+        for i_theta in range(n_seg):
+            hue = (i_theta + 0.5) / n_seg
+            # Flip across X-axis (negative angles) - same as viewport
+            theta1 = -(i_theta + 1) * 360 / n_seg
+            theta2 = -i_theta * 360 / n_seg
+            for i_r in range(n_rad):
+                r2 = (i_r + 1) / n_rad
+                sat = (i_r + 0.5) / n_rad
+                color = colorsys.hsv_to_rgb(hue, sat, 1.0)
+                wedge = Wedge((0, 0), r2, theta1, theta2, width=1.0 / n_rad,
+                             facecolor=color, edgecolor='none')
+                ax_inset.add_patch(wedge)
+
+        ax_inset.set_xlim(-1.4, 1.4)
+        ax_inset.set_ylim(-1.4, 1.4)
+        ax_inset.set_aspect('equal')
+        ax_inset.axis('off')
+
+        # Add direction labels (same as viewport)
+        label_style = {'fontsize': 6, 'color': text_color, 'ha': 'center', 'va': 'center',
+                       'fontweight': 'bold'}
+        ax_inset.text(1.2, 0, '+X', **label_style)
+        ax_inset.text(-1.2, 0, '-X', **label_style)
+        ax_inset.text(0, 1.2, 'Up', **label_style)
+        ax_inset.text(0, -1.2, 'Down', **label_style)
+
+    def _add_colorbar_to_export(self, fig, ax, cmap, vmin, vmax, text_color):
+        """Add colorbar to export figure for tilt angle mode."""
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        import matplotlib.pyplot as plt
+
+        # Create a ScalarMappable for the colorbar
+        norm = plt.Normalize(vmin=vmin, vmax=vmax)
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+
+        # Add colorbar
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="3%", pad=0.1)
+        cbar = fig.colorbar(sm, cax=cax)
+        cbar.set_label('Tilt Angle (°)', color=text_color)
+        cbar.ax.yaxis.set_tick_params(color=text_color)
+        cbar.ax.yaxis.set_ticklabels(cbar.ax.get_yticks(), color=text_color)
+        for label in cbar.ax.get_yticklabels():
+            label.set_color(text_color)
+
+    def _add_color_wheel_to_3d_screenshot(self, screenshot_array, filename, text_color, bg_color):
+        """Add color wheel legend to 3D screenshot and save using the existing color wheel pixmap."""
+        from PIL import Image
+        import numpy as np
+
+        # Convert screenshot to PIL Image
+        screenshot_img = Image.fromarray(screenshot_array)
+
+        # Get the color wheel pixmap from the label
+        if hasattr(self, 'color_wheel_label') and self.color_wheel_label.pixmap():
+            pixmap = self.color_wheel_label.pixmap()
+            # Convert QPixmap to PIL Image
+            qimg = pixmap.toImage()
+            width = qimg.width()
+            height = qimg.height()
+
+            # Convert QImage to numpy array
+            ptr = qimg.bits()
+            arr = np.array(ptr).reshape(height, width, 4)  # RGBA
+
+            # Create PIL Image from numpy array
+            wheel_img = Image.fromarray(arr, 'RGBA')
+
+            # Resize wheel to fit (15% of screenshot width)
+            wheel_size = int(screenshot_array.shape[1] * 0.15)
+            wheel_img = wheel_img.resize((wheel_size, wheel_size), Image.Resampling.LANCZOS)
+
+            # Calculate position (bottom-right corner with margin)
+            margin = int(screenshot_array.shape[1] * 0.02)
+            x = screenshot_array.shape[1] - wheel_size - margin
+            y = screenshot_array.shape[0] - wheel_size - margin
+
+            # Paste wheel onto screenshot (with alpha compositing)
+            screenshot_img = screenshot_img.convert('RGBA')
+            screenshot_img.paste(wheel_img, (x, y), wheel_img)
+
+        # Save the final image
+        if bg_color == 'Transparent':
+            screenshot_img.save(filename, 'PNG')
+        else:
+            # Convert to RGB for non-transparent
+            screenshot_img = screenshot_img.convert('RGB')
+            screenshot_img.save(filename)
+
+    def _add_colorbar_to_3d_screenshot(self, screenshot_array, filename, text_color, bg_color, cmap_name, vmin, vmax):
+        """Add colorbar legend to 3D screenshot and save."""
+        import matplotlib.pyplot as plt
+        from PIL import Image
+
+        # Get image dimensions
+        height, width = screenshot_array.shape[:2]
+
+        # Create figure matching screenshot size
+        dpi = 100
+        fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+
+        # Set background
+        if bg_color == 'White':
+            fig.patch.set_facecolor('white')
+        elif bg_color == 'Gray':
+            fig.patch.set_facecolor('#808080')
+        else:
+            fig.patch.set_alpha(0)
+
+        # Add screenshot as background
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.imshow(screenshot_array)
+        ax.axis('off')
+
+        # Add colorbar on right side
+        cax = fig.add_axes([0.92, 0.15, 0.02, 0.3])
+        cmap = plt.get_cmap(cmap_name)
+        norm = plt.Normalize(vmin=vmin, vmax=vmax)
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, cax=cax)
+        cbar.set_label('Tilt Angle (°)', color=text_color, fontsize=10)
+        cbar.ax.yaxis.set_tick_params(color=text_color, labelcolor=text_color)
+        for label in cbar.ax.get_yticklabels():
+            label.set_color(text_color)
+
+        # Save
+        plt.savefig(filename, dpi=dpi, bbox_inches='tight', pad_inches=0,
+                   transparent=(bg_color == 'Transparent'))
+        plt.close(fig)
+
+    def _plot_xy_slice_for_export(self, ax, z_pos, use_azimuth, angle_to_color, azimuth_to_color, show_diameter):
+        """Plot XY slice fiber points for export."""
+        from matplotlib.patches import Circle
+
+        tolerance = 3
+        all_trajectories = [(self.fiber_trajectory, 0, 0, 0)] if self.fiber_trajectory else []
+        for roi_name, roi_data in self.roi_trajectories.items():
+            if isinstance(roi_data, dict):
+                offset = roi_data['offset']
+                all_trajectories.append((roi_data['trajectory'], offset[2], offset[1], offset[0]))
+
+        for fiber_traj, x_offset, y_offset, z_offset in all_trajectories:
+            if fiber_traj is None:
+                continue
+            trajectories = fiber_traj.trajectories
+            angles = fiber_traj.angles
+            azimuths = getattr(fiber_traj, 'azimuths', angles)
+            fiber_diameter = getattr(fiber_traj, 'fiber_diameter', 7.0)
+            radius = fiber_diameter / 2.0
+
+            roi_z_pos = z_pos - z_offset
+            if 0 <= roi_z_pos < len(trajectories):
+                z, points = trajectories[roi_z_pos]
+                slice_angles = angles[roi_z_pos] if roi_z_pos < len(angles) else np.zeros(len(points))
+                if use_azimuth and roi_z_pos < len(azimuths):
+                    colors = [azimuth_to_color(az, tilt) for az, tilt in zip(azimuths[roi_z_pos], slice_angles)]
+                else:
+                    colors = [angle_to_color(a) for a in slice_angles]
+                ax.scatter(points[:, 0] + x_offset, points[:, 1] + y_offset, c=colors, s=10, alpha=0.8)
+
+                if show_diameter:
+                    for pt in points:
+                        circle = Circle((pt[0] + x_offset, pt[1] + y_offset), radius,
+                                       fill=False, edgecolor='red', linewidth=0.5)
+                        ax.add_patch(circle)
+
+    def _plot_xz_slice_for_export(self, ax, y_pos, use_azimuth, angle_to_color, azimuth_to_color, show_diameter):
+        """Plot XZ slice fiber points for export."""
+        from matplotlib.patches import Circle
+        tolerance = 3
+
+        all_trajectories = [(self.fiber_trajectory, 0, 0, 0)] if self.fiber_trajectory else []
+        for roi_name, roi_data in self.roi_trajectories.items():
+            if isinstance(roi_data, dict):
+                offset = roi_data['offset']
+                all_trajectories.append((roi_data['trajectory'], offset[2], offset[1], offset[0]))
+
+        for fiber_traj, x_offset, y_offset, z_offset in all_trajectories:
+            if fiber_traj is None:
+                continue
+            trajectories = fiber_traj.trajectories
+            angles = fiber_traj.angles
+            azimuths = getattr(fiber_traj, 'azimuths', angles)
+
+            roi_y_pos = y_pos - y_offset
+            for slice_idx, (z, points) in enumerate(trajectories):
+                mask = np.abs(points[:, 1] - roi_y_pos) < tolerance
+                if np.any(mask):
+                    x_coords = points[mask, 0] + x_offset
+                    z_coords = np.full(np.sum(mask), z + z_offset)
+                    slice_angles = angles[slice_idx] if slice_idx < len(angles) else np.zeros(len(points))
+                    if use_azimuth and slice_idx < len(azimuths):
+                        colors = [azimuth_to_color(az, tilt) for az, tilt in zip(np.array(azimuths[slice_idx])[mask], slice_angles[mask])]
+                    else:
+                        colors = [angle_to_color(a) for a in slice_angles[mask]]
+                    ax.scatter(z_coords, x_coords, c=colors, s=5, alpha=0.6)
+
+    def _plot_yz_slice_for_export(self, ax, x_pos, use_azimuth, angle_to_color, azimuth_to_color, show_diameter):
+        """Plot YZ slice fiber points for export."""
+        from matplotlib.patches import Circle
+        tolerance = 3
+
+        all_trajectories = [(self.fiber_trajectory, 0, 0, 0)] if self.fiber_trajectory else []
+        for roi_name, roi_data in self.roi_trajectories.items():
+            if isinstance(roi_data, dict):
+                offset = roi_data['offset']
+                all_trajectories.append((roi_data['trajectory'], offset[2], offset[1], offset[0]))
+
+        for fiber_traj, x_offset, y_offset, z_offset in all_trajectories:
+            if fiber_traj is None:
+                continue
+            trajectories = fiber_traj.trajectories
+            angles = fiber_traj.angles
+            azimuths = getattr(fiber_traj, 'azimuths', angles)
+
+            roi_x_pos = x_pos - x_offset
+            for slice_idx, (z, points) in enumerate(trajectories):
+                mask = np.abs(points[:, 0] - roi_x_pos) < tolerance
+                if np.any(mask):
+                    y_coords = points[mask, 1] + y_offset
+                    z_coords = np.full(np.sum(mask), z + z_offset)
+                    slice_angles = angles[slice_idx] if slice_idx < len(angles) else np.zeros(len(points))
+                    if use_azimuth and slice_idx < len(azimuths):
+                        colors = [azimuth_to_color(az, tilt) for az, tilt in zip(np.array(azimuths[slice_idx])[mask], slice_angles[mask])]
+                    else:
+                        colors = [angle_to_color(a) for a in slice_angles[mask]]
+                    ax.scatter(z_coords, y_coords, c=colors, s=5, alpha=0.6)
+
+
 class AnalysisTab(QWidget):
     def __init__(self, viewer=None):
         super().__init__()
@@ -2790,7 +5182,7 @@ class AnalysisTab(QWidget):
 
         self.ref_combo = QComboBox()
         self.ref_combo.addItems(["Z-axis", "Y-axis", "X-axis"])
-        self.ref_combo.setCurrentText("X-axis")  # Default to X-axis (depth direction)
+        self.ref_combo.setCurrentText("Z-axis")  # Default to Z-axis
         self.ref_combo.setStyleSheet("""
             QComboBox {
                 padding: 4px;
@@ -2808,10 +5200,186 @@ class AnalysisTab(QWidget):
         ref_layout.addWidget(self.ref_combo)
 
         toolbar_layout.addWidget(ref_group)
+
+        # Fiber Detection Group
+        fiber_group = QGroupBox("Fiber Detection")
+        fiber_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        fiber_layout = QHBoxLayout(fiber_group)
+
+        self.fiber_detect_settings_btn = RibbonButton("Detection\nSettings")
+        self.fiber_detect_settings_btn.clicked.connect(self.openFiberDetectionSettings)
+        fiber_layout.addWidget(self.fiber_detect_settings_btn)
+
+        self.fiber_detect_btn = RibbonButton("Detect\nFibers")
+        self.fiber_detect_btn.clicked.connect(self.detectFibers)
+        fiber_layout.addWidget(self.fiber_detect_btn)
+
+        toolbar_layout.addWidget(fiber_group)
+
         toolbar_layout.addStretch()
 
         layout.addWidget(toolbar)
         layout.addStretch()
+
+        # Initialize fiber detection settings
+        self.fiber_detection_settings = {
+            'min_diameter': 5.0,
+            'max_diameter': 25.0,
+            'min_distance': 5,
+            'show_watershed': True,
+            'show_centers': True,
+            'center_marker_size': 3
+        }
+
+    def openFiberDetectionSettings(self):
+        """Open fiber detection settings dialog"""
+        dialog = FiberDetectionSettingsDialog(self, self.fiber_detection_settings)
+        if dialog.exec() == QDialog.Accepted:
+            self.fiber_detection_settings = dialog.getSettings()
+
+    def detectFibers(self):
+        """Detect fibers in all slices of the ROI and display results"""
+        main_window = getattr(self, 'main_window', None)
+
+        if not main_window:
+            print("No main window reference")
+            return
+
+        if main_window.current_volume is None:
+            QMessageBox.warning(self, "Warning", "No volume loaded - please import a volume first")
+            return
+
+        if not main_window.viewer.rois:
+            QMessageBox.warning(self, "Warning", "No ROI defined - please create an ROI first")
+            return
+
+        # Get the last ROI
+        roi_name = f"ROI{main_window.viewer.roi_counter}"
+        if roi_name not in main_window.viewer.rois:
+            # Try to find any ROI
+            roi_name = list(main_window.viewer.rois.keys())[-1] if main_window.viewer.rois else None
+
+        if roi_name is None:
+            QMessageBox.warning(self, "Warning", "No valid ROI found")
+            return
+
+        roi_data = main_window.viewer.rois[roi_name]
+        bounds = roi_data.get('bounds')
+        if bounds is None:
+            QMessageBox.warning(self, "Warning", "ROI bounds not defined")
+            return
+
+        z_min, z_max, y_min, y_max, x_min, x_max = bounds
+        n_slices = z_max - z_min
+
+        main_window.status_label.setText(f"Detecting fibers in {roi_name} ({n_slices} slices)...")
+        main_window.showProgress(True)
+        main_window.progress_bar.setRange(0, n_slices)
+        QApplication.processEvents()
+
+        try:
+            # Import detect_fiber_centers
+            from acsc.fiber_trajectory import detect_fiber_centers
+
+            # Check if watershed display is enabled
+            show_watershed = self.fiber_detection_settings.get('show_watershed', True)
+
+            # Detect fiber centers in all slices
+            all_slice_results = {}
+            total_fibers = 0
+            all_diameters = []
+
+            for i, z in enumerate(range(z_min, z_max)):
+                # Update progress
+                main_window.progress_bar.setValue(i)
+                if i % 10 == 0:
+                    main_window.status_label.setText(f"Detecting fibers: slice {i+1}/{n_slices}...")
+                    QApplication.processEvents()
+
+                # Extract the slice from ROI
+                slice_image = main_window.current_volume[z, y_min:y_max, x_min:x_max]
+
+                # Determine threshold percentile (None for Otsu)
+                threshold_method = self.fiber_detection_settings.get('threshold_method', 'otsu')
+                threshold_percentile = None
+                if threshold_method == 'percentile':
+                    threshold_percentile = self.fiber_detection_settings.get('threshold_percentile', 50.0)
+
+                # Detect fiber centers (with labels if watershed display is enabled)
+                if show_watershed:
+                    centers, diameters, labels = detect_fiber_centers(
+                        slice_image,
+                        min_diameter=self.fiber_detection_settings['min_diameter'],
+                        max_diameter=self.fiber_detection_settings['max_diameter'],
+                        min_distance=self.fiber_detection_settings['min_distance'],
+                        return_labels=True,
+                        threshold_percentile=threshold_percentile
+                    )
+                else:
+                    centers, diameters = detect_fiber_centers(
+                        slice_image,
+                        min_diameter=self.fiber_detection_settings['min_diameter'],
+                        max_diameter=self.fiber_detection_settings['max_diameter'],
+                        min_distance=self.fiber_detection_settings['min_distance'],
+                        threshold_percentile=threshold_percentile
+                    )
+                    labels = None
+
+                if len(centers) > 0:
+                    all_slice_results[z] = {
+                        'centers': centers,
+                        'diameters': diameters,
+                        'labels': labels
+                    }
+                    total_fibers += len(centers)
+                    all_diameters.extend(diameters.tolist())
+
+            main_window.progress_bar.setValue(n_slices)
+            main_window.showProgress(False)
+
+            if total_fibers == 0:
+                QMessageBox.information(self, "Detection Result", "No fibers detected with current settings.")
+                main_window.status_label.setText("No fibers detected")
+                return
+
+            # Store detection results for all slices
+            main_window.viewer.fiber_detection_result = {
+                'all_slices': all_slice_results,
+                'roi_offset': (x_min, y_min),
+                'roi_bounds': bounds,
+                'settings': self.fiber_detection_settings.copy()
+            }
+
+            # Trigger visualization update
+            main_window.viewer.show_fiber_detection = True
+            # Force redraw of views
+            main_window.viewer.renderVolume()
+
+            # Show results
+            all_diameters_arr = np.array(all_diameters)
+            mean_diameter = np.mean(all_diameters_arr)
+            std_diameter = np.std(all_diameters_arr)
+            avg_fibers_per_slice = total_fibers / n_slices
+
+            main_window.status_label.setText(
+                f"Detected fibers in {len(all_slice_results)}/{n_slices} slices (avg: {avg_fibers_per_slice:.0f}/slice)"
+            )
+
+            QMessageBox.information(self, "Detection Complete",
+                f"Fiber detection completed\n\n"
+                f"Slices processed: {n_slices}\n"
+                f"Slices with fibers: {len(all_slice_results)}\n"
+                f"Avg fibers per slice: {avg_fibers_per_slice:.1f}\n\n"
+                f"Mean diameter: {mean_diameter:.2f} px\n"
+                f"Std deviation: {std_diameter:.2f} px\n"
+                f"Min diameter: {np.min(all_diameters_arr):.2f} px\n"
+                f"Max diameter: {np.max(all_diameters_arr):.2f} px"
+            )
+
+        except Exception as e:
+            main_window.showProgress(False)
+            QMessageBox.critical(self, "Detection Error", f"Failed to detect fibers:\n{str(e)}")
+            main_window.status_label.setText(f"Detection failed: {str(e)}")
 
     def toggleROIEdit(self, checked):
         """Toggle ROI editing mode"""
@@ -2959,6 +5527,8 @@ class AnalysisTab(QWidget):
                 main_window.orientation_data['phi'] = phi_trimmed
                 main_window.orientation_data['reference'] = reference_trimmed
                 main_window.orientation_data['trim_width'] = trim_width
+                main_window.orientation_data['structure_tensor'] = structure_tensor
+                main_window.orientation_data['noise_scale'] = noise_scale
 
                 main_window.showProgress(False)
                 main_window.status_label.setText(f"Analysis complete (Noise scale: {noise_scale})")
@@ -2970,6 +5540,10 @@ class AnalysisTab(QWidget):
                 # Enable histogram button in Simulation tab as well
                 if hasattr(main_window, 'simulation_tab'):
                     main_window.simulation_tab.histogram_btn.setEnabled(True)
+
+                # Pass structure tensor to Visualization tab for fiber trajectory generation
+                if hasattr(main_window, 'visualization_tab'):
+                    main_window.visualization_tab.setStructureTensor(structure_tensor, volume.shape, volume)
 
                 # Store orientation data in the ROI structure
                 if roi_name in main_window.viewer.rois:
@@ -3602,6 +6176,505 @@ class ExportDialog(QDialog):
             QMessageBox.critical(self, "Export Error", f"Failed to export data:\n{str(e)}")
 
 
+class FiberTrajectorySettingsDialog(QDialog):
+    """Dialog for fiber trajectory generation settings"""
+    def __init__(self, parent=None, settings=None):
+        super().__init__(parent)
+        self.setWindowTitle("Fiber Trajectory Settings")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+
+        # Default settings
+        self.settings = settings or {
+            'fiber_diameter': 12.0,
+            'volume_fraction': 0.5,
+            'propagation_axis': 'Z (default)',
+            'integration_method': 'RK4',
+            'tilt_min': 0.0,
+            'tilt_max': 20.0,
+            'sat_min': 0.0,
+            'sat_max': 20.0,
+            'relax': True,
+            'color_by_angle': True,
+            'color_by_fiber': False,
+            'show_fiber_diameter': False,
+            'resample': False,
+            'resample_interval': 20,
+            'use_detected_centers': False,
+            'detection_interval': 1,
+            'max_matching_distance': 10.0,
+            'add_new_fibers': False,
+            'new_fiber_interval': 10,
+            'smooth_trajectories': True,
+            'smooth_method': 'gaussian',
+            'smooth_sigma': 1.0,
+            'smooth_window': 5
+        }
+
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Fiber Parameters Group
+        fiber_group = QGroupBox("Fiber Parameters")
+        fiber_layout = QFormLayout(fiber_group)
+
+        self.fiber_diameter_spin = QDoubleSpinBox()
+        self.fiber_diameter_spin.setRange(1.0, 50.0)
+        self.fiber_diameter_spin.setValue(self.settings['fiber_diameter'])
+        self.fiber_diameter_spin.setSuffix(" px")
+        fiber_layout.addRow("Fiber Diameter:", self.fiber_diameter_spin)
+
+        self.volume_fraction_spin = QDoubleSpinBox()
+        self.volume_fraction_spin.setRange(0.1, 0.9)
+        self.volume_fraction_spin.setValue(self.settings['volume_fraction'])
+        self.volume_fraction_spin.setSingleStep(0.1)
+        fiber_layout.addRow("Volume Fraction:", self.volume_fraction_spin)
+
+        self.prop_axis_combo = QComboBox()
+        self.prop_axis_combo.addItems(["Z (default)", "Y", "X"])
+        self.prop_axis_combo.setCurrentText(self.settings['propagation_axis'])
+        fiber_layout.addRow("Propagation Axis:", self.prop_axis_combo)
+
+        self.integration_method_combo = QComboBox()
+        self.integration_method_combo.addItems(["Euler", "RK4"])
+        self.integration_method_combo.setCurrentText(self.settings.get('integration_method', 'RK4'))
+        self.integration_method_combo.setToolTip(
+            "Euler: 1st-order, fast but less accurate for curved trajectories\n"
+            "RK4: 4th-order Runge-Kutta, slower but more accurate"
+        )
+        fiber_layout.addRow("Integration Method:", self.integration_method_combo)
+
+        layout.addWidget(fiber_group)
+
+        # Color Mapping Group
+        color_group = QGroupBox("Color Mapping")
+        color_layout = QFormLayout(color_group)
+
+        # Tilt Range
+        tilt_widget = QWidget()
+        tilt_layout = QHBoxLayout(tilt_widget)
+        tilt_layout.setContentsMargins(0, 0, 0, 0)
+        self.tilt_min_spin = QDoubleSpinBox()
+        self.tilt_min_spin.setRange(0, 90)
+        self.tilt_min_spin.setValue(self.settings['tilt_min'])
+        self.tilt_min_spin.setSuffix("°")
+        tilt_layout.addWidget(self.tilt_min_spin)
+        tilt_layout.addWidget(QLabel("-"))
+        self.tilt_max_spin = QDoubleSpinBox()
+        self.tilt_max_spin.setRange(0, 90)
+        self.tilt_max_spin.setValue(self.settings['tilt_max'])
+        self.tilt_max_spin.setSuffix("°")
+        tilt_layout.addWidget(self.tilt_max_spin)
+        color_layout.addRow("Tilt Range:", tilt_widget)
+
+        # Saturation Range
+        sat_widget = QWidget()
+        sat_layout = QHBoxLayout(sat_widget)
+        sat_layout.setContentsMargins(0, 0, 0, 0)
+        self.sat_min_spin = QDoubleSpinBox()
+        self.sat_min_spin.setRange(0, 90)
+        self.sat_min_spin.setValue(self.settings['sat_min'])
+        self.sat_min_spin.setSuffix("°")
+        sat_layout.addWidget(self.sat_min_spin)
+        sat_layout.addWidget(QLabel("-"))
+        self.sat_max_spin = QDoubleSpinBox()
+        self.sat_max_spin.setRange(0, 90)
+        self.sat_max_spin.setValue(self.settings['sat_max'])
+        self.sat_max_spin.setSuffix("°")
+        sat_layout.addWidget(self.sat_max_spin)
+        color_layout.addRow("Saturation Range:", sat_widget)
+
+        layout.addWidget(color_group)
+
+        # Options Group
+        options_group = QGroupBox("Options")
+        options_layout = QVBoxLayout(options_group)
+
+        self.relax_check = QCheckBox("Maintain Fiber Distance")
+        self.relax_check.setChecked(self.settings['relax'])
+        options_layout.addWidget(self.relax_check)
+
+        self.color_by_angle_check = QCheckBox("Color by Angle")
+        self.color_by_angle_check.setChecked(self.settings['color_by_angle'])
+        self.color_by_angle_check.toggled.connect(self._onColorModeChanged)
+        options_layout.addWidget(self.color_by_angle_check)
+
+        self.color_by_fiber_check = QCheckBox("Color by Fiber (each fiber has unique color)")
+        self.color_by_fiber_check.setChecked(self.settings.get('color_by_fiber', False))
+        self.color_by_fiber_check.setToolTip(
+            "Assign a unique color to each fiber trajectory.\n"
+            "Useful for tracking individual fibers across slices."
+        )
+        self.color_by_fiber_check.toggled.connect(self._onColorModeChanged)
+        options_layout.addWidget(self.color_by_fiber_check)
+
+        self.show_fiber_diameter_check = QCheckBox("Show Fiber Diameter in Slice Views")
+        self.show_fiber_diameter_check.setChecked(self.settings['show_fiber_diameter'])
+        options_layout.addWidget(self.show_fiber_diameter_check)
+
+        layout.addWidget(options_group)
+
+        # Resample Group
+        resample_group = QGroupBox("Resampling")
+        resample_layout = QFormLayout(resample_group)
+
+        self.resample_check = QCheckBox("Enable Resampling")
+        self.resample_check.setChecked(self.settings['resample'])
+        resample_layout.addRow(self.resample_check)
+
+        self.resample_interval_spin = QSpinBox()
+        self.resample_interval_spin.setRange(5, 100)
+        self.resample_interval_spin.setValue(self.settings['resample_interval'])
+        self.resample_interval_spin.setSuffix(" slices")
+        resample_layout.addRow("Interval:", self.resample_interval_spin)
+
+        layout.addWidget(resample_group)
+
+        # Image-based Tracking Group
+        tracking_group = QGroupBox("Image-based Tracking")
+        tracking_layout = QFormLayout(tracking_group)
+
+        self.use_detected_centers_check = QCheckBox("Use Detected Fiber Centers")
+        self.use_detected_centers_check.setChecked(self.settings.get('use_detected_centers', False))
+        self.use_detected_centers_check.setToolTip(
+            "Use fiber centers detected in Analysis tab as initial positions.\n"
+            "Trajectory tracking will match predicted positions to detected centers."
+        )
+        self.use_detected_centers_check.toggled.connect(self._onDetectedCentersToggled)
+        tracking_layout.addRow(self.use_detected_centers_check)
+
+        self.detection_interval_spin = QSpinBox()
+        self.detection_interval_spin.setRange(1, 20)
+        self.detection_interval_spin.setValue(self.settings.get('detection_interval', 1))
+        self.detection_interval_spin.setSuffix(" slices")
+        self.detection_interval_spin.setToolTip(
+            "Interval between nearest-neighbor matching to detected centers.\n"
+            "1 = match every slice, higher = faster but less accurate"
+        )
+        tracking_layout.addRow("Detection Interval:", self.detection_interval_spin)
+
+        self.max_matching_distance_spin = QDoubleSpinBox()
+        self.max_matching_distance_spin.setRange(1.0, 50.0)
+        self.max_matching_distance_spin.setValue(self.settings.get('max_matching_distance', 10.0))
+        self.max_matching_distance_spin.setSuffix(" px")
+        self.max_matching_distance_spin.setToolTip(
+            "Maximum distance for matching predicted position to detected center.\n"
+            "If no center is within this distance, prediction is kept."
+        )
+        tracking_layout.addRow("Max Matching Distance:", self.max_matching_distance_spin)
+
+        self.add_new_fibers_check = QCheckBox("Add New Fibers from Detection")
+        self.add_new_fibers_check.setChecked(self.settings.get('add_new_fibers', False))
+        self.add_new_fibers_check.setToolTip(
+            "Add unmatched detected centers as new fiber trajectories.\n"
+            "Useful for tracking fibers that enter the domain from boundaries."
+        )
+        self.add_new_fibers_check.toggled.connect(self._onAddNewFibersToggled)
+        tracking_layout.addRow(self.add_new_fibers_check)
+
+        self.new_fiber_interval_spin = QSpinBox()
+        self.new_fiber_interval_spin.setRange(1, 50)
+        self.new_fiber_interval_spin.setValue(self.settings.get('new_fiber_interval', 10))
+        self.new_fiber_interval_spin.setSuffix(" slices")
+        self.new_fiber_interval_spin.setToolTip(
+            "Interval at which to check for new fibers from unmatched detections.\n"
+            "Lower = more frequent checks, higher = less overhead"
+        )
+        tracking_layout.addRow("New Fiber Interval:", self.new_fiber_interval_spin)
+
+        layout.addWidget(tracking_group)
+
+        # Store reference to resample group for enabling/disabling
+        self.resample_group = resample_group
+
+        # Initially update UI based on detected centers option
+        self._onDetectedCentersToggled(self.use_detected_centers_check.isChecked())
+
+        # Trajectory Smoothing Group
+        smooth_group = QGroupBox("Trajectory Smoothing")
+        smooth_layout = QFormLayout(smooth_group)
+
+        self.smooth_check = QCheckBox("Apply Smoothing")
+        self.smooth_check.setChecked(self.settings.get('smooth_trajectories', True))
+        self.smooth_check.setToolTip(
+            "Apply smoothing to reduce trajectory oscillation.\n"
+            "Recommended when using image-based tracking."
+        )
+        self.smooth_check.toggled.connect(self._onSmoothToggled)
+        smooth_layout.addRow(self.smooth_check)
+
+        self.smooth_method_combo = QComboBox()
+        self.smooth_method_combo.addItems(["gaussian", "moving_average"])
+        self.smooth_method_combo.setCurrentText(self.settings.get('smooth_method', 'gaussian'))
+        self.smooth_method_combo.setToolTip(
+            "gaussian: Smooth using Gaussian filter (sigma parameter)\n"
+            "moving_average: Simple moving average (window size parameter)"
+        )
+        self.smooth_method_combo.currentTextChanged.connect(self._onSmoothMethodChanged)
+        smooth_layout.addRow("Method:", self.smooth_method_combo)
+
+        self.smooth_sigma_spin = QDoubleSpinBox()
+        self.smooth_sigma_spin.setRange(0.5, 10.0)
+        self.smooth_sigma_spin.setValue(self.settings.get('smooth_sigma', 1.0))
+        self.smooth_sigma_spin.setSingleStep(0.5)
+        self.smooth_sigma_spin.setToolTip("Gaussian filter sigma (larger = more smoothing)")
+        smooth_layout.addRow("Sigma:", self.smooth_sigma_spin)
+
+        self.smooth_window_spin = QSpinBox()
+        self.smooth_window_spin.setRange(3, 21)
+        self.smooth_window_spin.setSingleStep(2)
+        self.smooth_window_spin.setValue(self.settings.get('smooth_window', 5))
+        self.smooth_window_spin.setToolTip("Moving average window size (odd number, larger = more smoothing)")
+        smooth_layout.addRow("Window Size:", self.smooth_window_spin)
+
+        # Initially update UI based on current settings
+        self._onSmoothToggled(self.smooth_check.isChecked())
+        self._onSmoothMethodChanged(self.smooth_method_combo.currentText())
+
+        layout.addWidget(smooth_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+    def _onDetectedCentersToggled(self, checked):
+        """Enable/disable options based on whether detected centers are used.
+
+        When using detected fiber centers:
+        - Volume Fraction is disabled (fiber count comes from detection)
+        - Integration Method is disabled (always uses RK4 with detection)
+        - Resampling is disabled (not applicable with detection-based tracking)
+        - Detection interval and max matching distance are enabled
+        """
+        # Enable/disable tracking-specific options
+        self.detection_interval_spin.setEnabled(checked)
+        self.max_matching_distance_spin.setEnabled(checked)
+        self.add_new_fibers_check.setEnabled(checked)
+        self.new_fiber_interval_spin.setEnabled(checked and self.add_new_fibers_check.isChecked())
+
+        # Disable options that don't apply when using detected centers
+        self.volume_fraction_spin.setEnabled(not checked)
+        self.integration_method_combo.setEnabled(not checked)
+        self.resample_group.setEnabled(not checked)
+
+    def _onAddNewFibersToggled(self, checked):
+        """Enable/disable new fiber interval based on add_new_fibers checkbox."""
+        self.new_fiber_interval_spin.setEnabled(checked and self.use_detected_centers_check.isChecked())
+
+    def _onColorModeChanged(self, checked):
+        """Handle mutual exclusivity between color_by_angle and color_by_fiber."""
+        sender = self.sender()
+        if sender == self.color_by_angle_check and checked:
+            # If color_by_angle is checked, uncheck color_by_fiber
+            self.color_by_fiber_check.blockSignals(True)
+            self.color_by_fiber_check.setChecked(False)
+            self.color_by_fiber_check.blockSignals(False)
+        elif sender == self.color_by_fiber_check and checked:
+            # If color_by_fiber is checked, uncheck color_by_angle
+            self.color_by_angle_check.blockSignals(True)
+            self.color_by_angle_check.setChecked(False)
+            self.color_by_angle_check.blockSignals(False)
+
+    def _onSmoothToggled(self, checked):
+        """Enable/disable smoothing options based on checkbox state"""
+        self.smooth_method_combo.setEnabled(checked)
+        self.smooth_sigma_spin.setEnabled(checked)
+        self.smooth_window_spin.setEnabled(checked)
+        if checked:
+            self._onSmoothMethodChanged(self.smooth_method_combo.currentText())
+
+    def _onSmoothMethodChanged(self, method):
+        """Show/hide relevant smoothing parameters based on method"""
+        if not self.smooth_check.isChecked():
+            return
+        if method == 'gaussian':
+            self.smooth_sigma_spin.setEnabled(True)
+            self.smooth_window_spin.setEnabled(False)
+        else:  # moving_average
+            self.smooth_sigma_spin.setEnabled(False)
+            self.smooth_window_spin.setEnabled(True)
+
+    def getSettings(self):
+        """Return the current settings"""
+        return {
+            'fiber_diameter': self.fiber_diameter_spin.value(),
+            'volume_fraction': self.volume_fraction_spin.value(),
+            'propagation_axis': self.prop_axis_combo.currentText(),
+            'integration_method': self.integration_method_combo.currentText(),
+            'tilt_min': self.tilt_min_spin.value(),
+            'tilt_max': self.tilt_max_spin.value(),
+            'sat_min': self.sat_min_spin.value(),
+            'sat_max': self.sat_max_spin.value(),
+            'relax': self.relax_check.isChecked(),
+            'color_by_angle': self.color_by_angle_check.isChecked(),
+            'color_by_fiber': self.color_by_fiber_check.isChecked(),
+            'show_fiber_diameter': self.show_fiber_diameter_check.isChecked(),
+            'resample': self.resample_check.isChecked(),
+            'resample_interval': self.resample_interval_spin.value(),
+            'use_detected_centers': self.use_detected_centers_check.isChecked(),
+            'detection_interval': self.detection_interval_spin.value(),
+            'max_matching_distance': self.max_matching_distance_spin.value(),
+            'add_new_fibers': self.add_new_fibers_check.isChecked(),
+            'new_fiber_interval': self.new_fiber_interval_spin.value(),
+            'smooth_trajectories': self.smooth_check.isChecked(),
+            'smooth_method': self.smooth_method_combo.currentText(),
+            'smooth_sigma': self.smooth_sigma_spin.value(),
+            'smooth_window': self.smooth_window_spin.value()
+        }
+
+
+class FiberDetectionSettingsDialog(QDialog):
+    """Dialog for fiber detection settings in Analysis tab"""
+    def __init__(self, parent=None, settings=None):
+        super().__init__(parent)
+        self.setWindowTitle("Fiber Detection Settings")
+        self.setModal(True)
+        self.setMinimumWidth(350)
+
+        # Default settings
+        self.settings = settings or {
+            'min_diameter': 5.0,
+            'max_diameter': 25.0,
+            'min_distance': 5,
+            'threshold_method': 'otsu',
+            'threshold_percentile': 50.0,
+            'show_watershed': True,
+            'show_centers': True,
+            'center_marker_size': 3
+        }
+
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Detection Parameters Group
+        detect_group = QGroupBox("Detection Parameters")
+        detect_layout = QFormLayout(detect_group)
+
+        # Diameter range
+        diameter_widget = QWidget()
+        diameter_layout = QHBoxLayout(diameter_widget)
+        diameter_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.min_diameter_spin = QDoubleSpinBox()
+        self.min_diameter_spin.setRange(1.0, 50.0)
+        self.min_diameter_spin.setValue(self.settings['min_diameter'])
+        self.min_diameter_spin.setSuffix(" px")
+        self.min_diameter_spin.setToolTip("Minimum fiber diameter to detect")
+        diameter_layout.addWidget(self.min_diameter_spin)
+
+        diameter_layout.addWidget(QLabel("-"))
+
+        self.max_diameter_spin = QDoubleSpinBox()
+        self.max_diameter_spin.setRange(1.0, 100.0)
+        self.max_diameter_spin.setValue(self.settings['max_diameter'])
+        self.max_diameter_spin.setSuffix(" px")
+        self.max_diameter_spin.setToolTip("Maximum fiber diameter to detect")
+        diameter_layout.addWidget(self.max_diameter_spin)
+
+        detect_layout.addRow("Diameter Range:", diameter_widget)
+
+        self.min_distance_spin = QSpinBox()
+        self.min_distance_spin.setRange(1, 50)
+        self.min_distance_spin.setValue(self.settings['min_distance'])
+        self.min_distance_spin.setSuffix(" px")
+        self.min_distance_spin.setToolTip("Minimum distance between fiber centers")
+        detect_layout.addRow("Min Peak Distance:", self.min_distance_spin)
+
+        layout.addWidget(detect_group)
+
+        # Threshold Group
+        threshold_group = QGroupBox("Threshold Settings")
+        threshold_layout = QFormLayout(threshold_group)
+
+        self.threshold_method_combo = QComboBox()
+        self.threshold_method_combo.addItems(["otsu", "percentile"])
+        self.threshold_method_combo.setCurrentText(self.settings.get('threshold_method', 'otsu'))
+        self.threshold_method_combo.setToolTip(
+            "otsu: Automatic threshold using Otsu's method\n"
+            "percentile: Manual threshold based on pixel intensity percentile"
+        )
+        self.threshold_method_combo.currentTextChanged.connect(self._onThresholdMethodChanged)
+        threshold_layout.addRow("Method:", self.threshold_method_combo)
+
+        self.threshold_percentile_spin = QDoubleSpinBox()
+        self.threshold_percentile_spin.setRange(1.0, 99.0)
+        self.threshold_percentile_spin.setValue(self.settings.get('threshold_percentile', 50.0))
+        self.threshold_percentile_spin.setSuffix(" %")
+        self.threshold_percentile_spin.setToolTip(
+            "Percentile value for thresholding.\n"
+            "Higher values = stricter threshold (fewer fibers detected)\n"
+            "Lower values = looser threshold (more fibers detected)"
+        )
+        threshold_layout.addRow("Percentile:", self.threshold_percentile_spin)
+
+        # Initialize percentile spin state
+        self._onThresholdMethodChanged(self.threshold_method_combo.currentText())
+
+        layout.addWidget(threshold_group)
+
+        # Visualization Group
+        viz_group = QGroupBox("Visualization")
+        viz_layout = QFormLayout(viz_group)
+
+        self.show_watershed_check = QCheckBox("Show Watershed Regions")
+        self.show_watershed_check.setChecked(self.settings['show_watershed'])
+        self.show_watershed_check.setToolTip("Display colored watershed segmentation regions")
+        viz_layout.addRow(self.show_watershed_check)
+
+        self.show_centers_check = QCheckBox("Show Fiber Centers")
+        self.show_centers_check.setChecked(self.settings['show_centers'])
+        self.show_centers_check.setToolTip("Display detected fiber center points")
+        viz_layout.addRow(self.show_centers_check)
+
+        self.marker_size_spin = QSpinBox()
+        self.marker_size_spin.setRange(1, 20)
+        self.marker_size_spin.setValue(self.settings['center_marker_size'])
+        self.marker_size_spin.setSuffix(" px")
+        self.marker_size_spin.setToolTip("Size of center marker points")
+        viz_layout.addRow("Marker Size:", self.marker_size_spin)
+
+        layout.addWidget(viz_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+    def _onThresholdMethodChanged(self, method):
+        """Enable/disable percentile spin based on threshold method"""
+        self.threshold_percentile_spin.setEnabled(method == 'percentile')
+
+    def getSettings(self):
+        """Return the current settings"""
+        return {
+            'min_diameter': self.min_diameter_spin.value(),
+            'max_diameter': self.max_diameter_spin.value(),
+            'min_distance': self.min_distance_spin.value(),
+            'threshold_method': self.threshold_method_combo.currentText(),
+            'threshold_percentile': self.threshold_percentile_spin.value(),
+            'show_watershed': self.show_watershed_check.isChecked(),
+            'show_centers': self.show_centers_check.isChecked(),
+            'center_marker_size': self.marker_size_spin.value()
+        }
+
+
 class SimulationSettingsDialog(QDialog):
     """Dialog for advanced simulation settings"""
     def __init__(self, parent=None, settings=None):
@@ -3692,7 +6765,7 @@ class SimulationSettingsDialog(QDialog):
 
         self.kink_width_spin = QDoubleSpinBox()
         self.kink_width_spin.setRange(0.001, 100)
-        self.kink_width_spin.setValue(self.settings.get('kink_width') or 0.5)
+        self.kink_width_spin.setValue(self.settings.get('kink_width') or 0.1)  # Default 100 μm
         self.kink_width_spin.setSuffix(" mm")
         self.kink_width_spin.setDecimals(3)
         self.kink_width_spin.setSingleStep(0.1)
@@ -3745,7 +6818,7 @@ class SimulationSettingsDialog(QDialog):
         self.max_misalign_spin.setValue(20.0)
         self.misalign_step_spin.setValue(0.1)
         self.use_correction_check.setChecked(False)
-        self.kink_width_spin.setValue(0.5)
+        self.kink_width_spin.setValue(0.1)  # 100 μm
         self.gauge_length_spin.setValue(10.0)
 
     def getSettings(self):
@@ -3792,6 +6865,17 @@ class SimulationTab(QWidget):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setSpacing(10)
 
+        # Settings Group (first)
+        settings_group = QGroupBox("Settings")
+        settings_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        settings_layout = QVBoxLayout(settings_group)
+
+        self.settings_btn = RibbonButton("Settings")
+        self.settings_btn.clicked.connect(self.openSettingsDialog)
+        settings_layout.addWidget(self.settings_btn)
+
+        toolbar_layout.addWidget(settings_group)
+
         # Simulation Group
         sim_group = QGroupBox("Simulation")
         sim_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
@@ -3818,17 +6902,6 @@ class SimulationTab(QWidget):
         analysis_layout.addWidget(self.histogram_btn)
 
         toolbar_layout.addWidget(analysis_group)
-
-        # Settings Group
-        settings_group = QGroupBox("Settings")
-        settings_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
-        settings_layout = QVBoxLayout(settings_group)
-
-        self.settings_btn = RibbonButton("Settings")
-        self.settings_btn.clicked.connect(self.openSettingsDialog)
-        settings_layout.addWidget(self.settings_btn)
-
-        toolbar_layout.addWidget(settings_group)
 
         # Export Group
         export_group = QGroupBox("Export")
@@ -4362,8 +7435,8 @@ class ACSCMainWindow(QMainWindow):
         self.tabs.setMaximumHeight(200)
 
         # Create tabs
-        self.visualization_tab = VisualizationTab()
-        self.tabs.addTab(self.visualization_tab, "Visualization")
+        self.volume_tab = VolumeTab()
+        self.tabs.addTab(self.volume_tab, "Volume")
 
         # Analysis tab
         self.analysis_tab = AnalysisTab()
@@ -4373,6 +7446,11 @@ class ACSCMainWindow(QMainWindow):
         self.simulation_tab = SimulationTab()
         self.simulation_tab.setMainWindow(self)
         self.tabs.addTab(self.simulation_tab, "Simulation")
+
+        # Visualization tab (fiber trajectory) - last tab
+        self.visualization_tab = VisualizationTab()
+        self.visualization_tab.setMainWindow(self)
+        self.tabs.addTab(self.visualization_tab, "Visualization")
 
         main_layout.addWidget(self.tabs)
 
@@ -4463,7 +7541,7 @@ class ACSCMainWindow(QMainWindow):
         self.content_splitter.addWidget(self.viewer)
 
         # Connect visualization controls to viewer
-        self.visualization_tab.connectViewer(self.viewer)
+        self.volume_tab.connectViewer(self.viewer)
 
         # Connect analysis tab to viewer and main window
         self.analysis_tab.viewer = self.viewer
@@ -4588,17 +7666,27 @@ class ACSCMainWindow(QMainWindow):
 
     def onTabChanged(self, index):
         """Handle tab change to show/hide appropriate controls"""
-        if index == 2:  # Simulation tab (index 2)
+        # Tab indices: 0=Volume, 1=Analysis, 2=Simulation, 3=Visualization
+        if index == 2:  # Simulation tab
             # Hide slicer view, show simulation content
             self.content_splitter.setVisible(False)
             self.simulation_content.setVisible(True)
             self.noise_group.setVisible(False)
+            self.tabs.setMaximumHeight(200)
+        elif index == 3:  # Visualization tab (fiber trajectory)
+            # Hide slicer view, Visualization tab has its own viewport
+            self.content_splitter.setVisible(False)
+            self.simulation_content.setVisible(False)
+            self.noise_group.setVisible(False)
+            # Remove height limit for Visualization tab (full window)
+            self.tabs.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
         else:
             # Show slicer view, hide simulation content
             self.content_splitter.setVisible(True)
             self.simulation_content.setVisible(False)
             # Show noise group only for Analysis tab
             self.noise_group.setVisible(index == 1)
+            self.tabs.setMaximumHeight(200)
 
 
     def updateSlices(self):
@@ -4696,7 +7784,7 @@ class ACSCMainWindow(QMainWindow):
             self.z_slice_spin.setEnabled(True)
 
         # Switch to visualization tab
-        self.tabs.setCurrentWidget(self.visualization_tab)
+        self.tabs.setCurrentWidget(self.volume_tab)
 
     def updateStatus(self, message):
         self.status_label.setText(message)

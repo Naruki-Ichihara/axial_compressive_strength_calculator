@@ -1,10 +1,11 @@
-"""Runtime hook to set Qt plugin path for PyInstaller builds."""
+# Runtime hook for ACSC
+# This hook runs before the main application starts
+
 import os
 import sys
 
-if getattr(sys, 'frozen', False):
-    # Running as compiled executable
-    app_path = os.path.dirname(sys.executable)
-    # PyInstaller puts data files in _internal folder
-    plugin_path = os.path.join(app_path, '_internal', 'PySide6', 'plugins')
-    os.environ['QT_PLUGIN_PATH'] = plugin_path
+# Suppress Qt plugin warnings
+os.environ['QT_LOGGING_RULES'] = '*.debug=false;qt.qpa.*=false'
+
+# Set VTK environment for PyVista
+os.environ['VTK_SMP_BACKEND_IN_USE'] = 'Sequential'

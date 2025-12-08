@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "acsc"
-version = "0.0.1"
+version = "0.0.5"
 description = "Axial compressive strength calculator"
 readme = "README.md"
 license = {text = "MIT"}

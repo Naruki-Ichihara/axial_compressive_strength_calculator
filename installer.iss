@@ -3,7 +3,7 @@
 
 #define MyAppName "ACSC"
 #define MyAppFullName "Axial Compressive Strength Calculator"
-#define MyAppVersion "0.0.1"
+#define MyAppVersion "0.0.5"
 #define MyAppPublisher "Naruki-Ichihara"
 #define MyAppURL "https://github.com/Naruki-Ichihara/axial_compressive_strength_calculator"
 #define MyAppExeName "ACSC.exe"

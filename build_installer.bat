@@ -95,7 +95,7 @@ echo  Build Complete!
 echo ============================================
 echo.
 echo Portable version: dist\ACSC\
-echo Installer:        installer_output\ACSC_Setup_0.0.1.exe
+echo Installer:        installer_output\ACSC_Setup_0.0.5.exe
 echo.
 
 endlocal
