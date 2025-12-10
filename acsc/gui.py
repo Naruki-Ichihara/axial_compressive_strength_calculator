@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QButtonGroup, QFrame, QScrollArea, QTabWidget,
                                QToolBar, QSizePolicy, QSplitter, QDialog)
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer
-from PySide6.QtGui import QFont, QPalette, QColor, QAction, QIcon
+from PySide6.QtGui import QFont, QPalette, QColor, QAction, QIcon, QPixmap
 import cv2 as cv
 from acsc.io import import_image_sequence, trim_image
 from acsc.analysis import compute_structure_tensor, compute_orientation, drop_edges_3D, _orientation_function, _orientation_function_reference
@@ -1580,6 +1580,11 @@ class Viewer2D(QWidget):
         self.fiber_detection_result = None
         self.show_fiber_detection = False
 
+        # Volume fraction visualization
+        self.vf_map = None
+        self.vf_roi_bounds = None
+        self.show_vf_overlay = False
+
         self.initUI()
 
     def initUI(self):
@@ -2409,6 +2414,49 @@ class Viewer2D(QWidget):
             self.ax_xy.legend(loc='upper right', fontsize=8,
                              facecolor='white', edgecolor='gray', framealpha=0.9)
 
+    def _renderVfOverlay(self):
+        """Render volume fraction overlay on all slice views."""
+        if not self.show_vf_overlay or self.vf_map is None or self.vf_roi_bounds is None:
+            return
+
+        z_min, z_max, y_min, y_max, x_min, x_max = self.vf_roi_bounds
+
+        # Get Vf slice for XY view (only if current Z slice is within ROI)
+        if z_min <= self.slice_z < z_max:
+            vf_z_idx = self.slice_z - z_min
+            if 0 <= vf_z_idx < self.vf_map.shape[0]:
+                vf_slice_xy = self.vf_map[vf_z_idx, :, :]
+                extent_xy = [x_min, x_max, y_min, y_max]
+                self.ax_xy.imshow(vf_slice_xy, cmap='jet', origin='lower',
+                                 extent=extent_xy, alpha=0.5, zorder=2,
+                                 vmin=0, vmax=1, interpolation='bilinear')
+
+        # XZ view (Y slice) - always show using center Y of ROI if outside bounds
+        if y_min <= self.slice_y < y_max:
+            vf_y_idx = self.slice_y - y_min
+        else:
+            # Use center Y slice of ROI when outside bounds
+            vf_y_idx = (y_max - y_min) // 2
+        if 0 <= vf_y_idx < self.vf_map.shape[1]:
+            vf_slice_xz = self.vf_map[:, vf_y_idx, :]
+            extent_xz = [x_min, x_max, z_min, z_max]
+            self.ax_xz.imshow(vf_slice_xz, cmap='jet', origin='lower',
+                             extent=extent_xz, alpha=0.5, zorder=2,
+                             vmin=0, vmax=1, interpolation='bilinear')
+
+        # YZ view (X slice) - always show using center X of ROI if outside bounds
+        if x_min <= self.slice_x < x_max:
+            vf_x_idx = self.slice_x - x_min
+        else:
+            # Use center X slice of ROI when outside bounds
+            vf_x_idx = (x_max - x_min) // 2
+        if 0 <= vf_x_idx < self.vf_map.shape[2]:
+            vf_slice_yz = self.vf_map[:, :, vf_x_idx]
+            extent_yz = [y_min, y_max, z_min, z_max]
+            self.ax_yz.imshow(vf_slice_yz, cmap='jet', origin='lower',
+                             extent=extent_yz, alpha=0.5, zorder=2,
+                             vmin=0, vmax=1, interpolation='bilinear')
+
     def enableZoom(self, enabled):
         """Enable or disable zoom mode"""
         self.zoom_enabled = enabled
@@ -2783,6 +2831,9 @@ class Viewer2D(QWidget):
         # Render fiber detection results if available
         self._renderFiberDetection()
 
+        # Render Vf overlay if enabled
+        self._renderVfOverlay()
+
         # Draw ROI rectangles
         self._drawAllROIOverlays()
 
@@ -2863,6 +2914,9 @@ class Viewer2D(QWidget):
             # Render fiber detection results if available
             self._renderFiberDetection()
 
+            # Render volume fraction overlay if available
+            self._renderVfOverlay()
+
             self.figure_xy.tight_layout()
 
             # Render XZ plane (Y slice)
@@ -2892,6 +2946,9 @@ class Viewer2D(QWidget):
 
             # Check if orientation overlay should be shown
             self._renderOrientationOverlay()
+
+            # Render Vf overlay if enabled
+            self._renderVfOverlay()
 
             # Render dual histograms - intensity (left) and orientation (right)
             import matplotlib.pyplot as plt
@@ -3243,7 +3300,8 @@ class VolumeTab(QWidget):
         self.screenshot_btn.clicked.connect(self.takeScreenshot)
         export_layout.addWidget(self.screenshot_btn)
 
-        self.export_btn = RibbonButton("Export\n3D")
+        self.export_btn = RibbonButton("Export\nVTK")
+        self.export_btn.setToolTip("Export CT volume to VTK format for Paraview")
         self.export_btn.clicked.connect(self.export3D)
         export_layout.addWidget(self.export_btn)
 
@@ -3315,25 +3373,48 @@ class VolumeTab(QWidget):
                 msg.exec_()
 
     def export3D(self):
-        if self.viewer:
-            filename, selected_filter = QFileDialog.getSaveFileName(
-                self, "Export 3D Model", "", "VTK Files (*.vtk);;STL Files (*.stl);;VTI Files (*.vti)"
-            )
-            if filename:
-                # Add correct extension based on selected filter if not present
-                if selected_filter == "VTK Files (*.vtk)" and not filename.endswith('.vtk'):
-                    filename += '.vtk'
-                elif selected_filter == "STL Files (*.stl)" and not filename.endswith('.stl'):
-                    filename += '.stl'
-                elif selected_filter == "VTI Files (*.vti)" and not filename.endswith('.vti'):
-                    filename += '.vti'
-                elif not any(filename.endswith(ext) for ext in ['.vtk', '.stl', '.vti']):
-                    # Default to .vtk if no supported extension
-                    filename += '.vtk'
+        """Export CT volume to VTK format for Paraview."""
+        import pyvista as pv
 
-                # Use default iso value for 3D export (mean of volume)
-                iso_value = np.mean(self.viewer.current_volume) if self.viewer.current_volume is not None else 128
-                self.viewer.export3D(filename, iso_value)
+        if not self.viewer or self.viewer.current_volume is None:
+            QMessageBox.warning(self, "No Data", "No volume loaded to export.")
+            return
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export CT Volume", "",
+            "VTK ImageData (*.vti);;Legacy VTK (*.vtk);;All Files (*)"
+        )
+        if not filename:
+            return
+
+        if not filename.lower().endswith(('.vti', '.vtk')):
+            filename += '.vti'
+
+        try:
+            volume = self.viewer.current_volume
+
+            # Create VTK ImageData
+            grid = pv.ImageData()
+            grid.dimensions = np.array(volume.shape) + 1
+            grid.spacing = (1, 1, 1)
+
+            # Add volume data as cell data
+            grid.cell_data['CTValue'] = volume.flatten(order='F')
+
+            grid.save(filename)
+
+            QMessageBox.information(
+                self, "Export Successful",
+                f"CT volume exported to:\n{filename}\n\n"
+                f"Volume shape: {volume.shape}\n"
+                f"Value range: [{volume.min()}, {volume.max()}]\n\n"
+                "Data field: CTValue"
+            )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
 
 # Volume info setting removed - now handled by main window
 
@@ -3412,6 +3493,11 @@ class VisualizationTab(QWidget):
         self.export_screenshot_btn.clicked.connect(self.showExportScreenshotDialog)
         export_layout.addWidget(self.export_screenshot_btn)
 
+        self.export_vtk_btn = RibbonButton("Export\nVTK")
+        self.export_vtk_btn.setEnabled(False)
+        self.export_vtk_btn.clicked.connect(self.exportTrajectoryToVTK)
+        export_layout.addWidget(self.export_vtk_btn)
+
         toolbar_layout.addWidget(export_group)
 
         # Analysis Group
@@ -3443,39 +3529,6 @@ class VisualizationTab(QWidget):
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(5, 5, 5, 5)
-
-        # ROI Pipeline Group
-        roi_group = QGroupBox("ROI Pipeline")
-        roi_layout = QVBoxLayout(roi_group)
-
-        roi_info_label = QLabel("Select ROIs to display:")
-        roi_info_label.setStyleSheet("color: #666; font-size: 10px;")
-        roi_layout.addWidget(roi_info_label)
-
-        # Scroll area for ROI checkboxes
-        self.roi_scroll = QScrollArea()
-        self.roi_scroll.setWidgetResizable(True)
-        self.roi_scroll.setMaximumHeight(120)
-        self.roi_list_widget = QWidget()
-        self.roi_list_layout = QVBoxLayout(self.roi_list_widget)
-        self.roi_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.roi_list_layout.setSpacing(2)
-        self.roi_checkboxes = {}  # Store ROI checkboxes
-        # Initial message
-        no_roi_label = QLabel("No ROIs available")
-        no_roi_label.setStyleSheet("color: #888; font-style: italic;")
-        self.roi_list_layout.addWidget(no_roi_label)
-        self.roi_checkboxes['_no_roi'] = no_roi_label
-        self.roi_list_layout.addStretch()
-        self.roi_scroll.setWidget(self.roi_list_widget)
-        roi_layout.addWidget(self.roi_scroll)
-
-        # Refresh ROI list button
-        self.refresh_roi_btn = QPushButton("Refresh ROI List")
-        self.refresh_roi_btn.clicked.connect(self.refreshROIList)
-        roi_layout.addWidget(self.refresh_roi_btn)
-
-        left_layout.addWidget(roi_group)
 
         # Display Options Group
         display_group = QGroupBox("Display Options")
@@ -3808,6 +3861,27 @@ class VisualizationTab(QWidget):
             self.main_window.status_label.setText(message)
             QApplication.processEvents()
 
+    def _getVfMapFromAnalysisTab(self):
+        """Get Vf map and bounds from analysis tab if available.
+
+        Returns:
+            Tuple of (vf_map, vf_roi_bounds) or (None, None) if not available.
+        """
+        if self.main_window and hasattr(self.main_window, 'analysis_tab'):
+            analysis_tab = self.main_window.analysis_tab
+            if hasattr(analysis_tab, 'vf_map') and analysis_tab.vf_map is not None:
+                vf_map = analysis_tab.vf_map
+                vf_roi_bounds = getattr(analysis_tab, 'vf_roi_bounds', None)
+                if vf_roi_bounds is not None:
+                    import numpy as np
+                    self.updateMainStatus(
+                        f"Using Vf map: shape={vf_map.shape}, "
+                        f"range=[{vf_map.min():.4f}, {vf_map.max():.4f}], "
+                        f"mean={vf_map.mean():.4f}"
+                    )
+                    return vf_map, vf_roi_bounds
+        return None, None
+
     def setMainWindow(self, main_window):
         """Set reference to main window for accessing shared data."""
         self.main_window = main_window
@@ -3860,53 +3934,71 @@ class VisualizationTab(QWidget):
         """Refresh the list of available ROIs from the main window."""
         if self.main_window is None or not hasattr(self.main_window, 'viewer'):
             return
+        # ROI selection removed - all ROIs are automatically used
+        pass
 
-        # Clear all widgets from layout
-        while self.roi_list_layout.count():
-            item = self.roi_list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self.roi_checkboxes.clear()
+    def _updateSliceSlidersToTrajectoryBounds(self):
+        """Update slice sliders to center of trajectory bounds."""
+        x_min, x_max = 0, 100
+        y_min, y_max = 0, 100
+        z_min, z_max = 0, 100
 
-        # Get ROIs from viewer
-        rois = self.main_window.viewer.rois if hasattr(self.main_window.viewer, 'rois') else {}
+        if self.roi_trajectories:
+            # Compute bounds from all ROI trajectories
+            for roi_name, roi_data in self.roi_trajectories.items():
+                if not isinstance(roi_data, dict):
+                    continue
+                bounds = roi_data.get('bounds', None)
+                offset = roi_data.get('offset', (0, 0, 0))
+                z_offset, y_offset, x_offset = offset
+                if bounds:
+                    roi_z_min, roi_z_max, roi_y_min, roi_y_max, roi_x_min, roi_x_max = bounds
+                    x_max = max(x_max, roi_x_max)
+                    y_max = max(y_max, roi_y_max)
+                    z_max = max(z_max, roi_z_max)
+                else:
+                    # Compute from trajectory data
+                    fiber_traj = roi_data.get('trajectory')
+                    if fiber_traj and fiber_traj.trajectories:
+                        z_max = max(z_max, z_offset + len(fiber_traj.trajectories))
+                        for _, points in fiber_traj.trajectories:
+                            if len(points) > 0:
+                                x_max = max(x_max, x_offset + int(np.max(points[:, 0])))
+                                y_max = max(y_max, y_offset + int(np.max(points[:, 1])))
+        elif self.fiber_trajectory is not None:
+            # Use single trajectory bounds
+            trajectories = self.fiber_trajectory.trajectories
+            if trajectories:
+                z_max = len(trajectories)
+                for _, points in trajectories:
+                    if len(points) > 0:
+                        x_max = max(x_max, int(np.max(points[:, 0])))
+                        y_max = max(y_max, int(np.max(points[:, 1])))
 
-        if not rois:
-            no_roi_label = QLabel("No ROIs available")
-            no_roi_label.setStyleSheet("color: #888; font-style: italic;")
-            self.roi_list_layout.addWidget(no_roi_label)
-            self.roi_checkboxes['_no_roi'] = no_roi_label
-            self.roi_list_layout.addStretch()
-            return
-
-        # Add checkbox for each ROI, preserving previous selection state
-        # By default, all ROIs are selected
-        previously_selected = list(self.roi_trajectories.keys()) if self.roi_trajectories else None
-
-        for i, roi_name in enumerate(sorted(rois.keys())):
-            checkbox = QCheckBox(roi_name)
-            # Check if was previously selected, otherwise check all ROIs by default
-            if previously_selected is not None:
-                checkbox.setChecked(roi_name in previously_selected)
-            else:
-                checkbox.setChecked(True)  # Select all ROIs by default
-            checkbox.stateChanged.connect(self.onROISelectionChanged)
-            self.roi_list_layout.addWidget(checkbox)
-            self.roi_checkboxes[roi_name] = checkbox
-
-        self.roi_list_layout.addStretch()
+        # Update slider ranges and center positions
+        if x_max > 0:
+            self.x_slice_slider.setRange(0, x_max - 1)
+            self.x_slice_slider.setValue(x_max // 2)
+            self.current_slice['x'] = x_max // 2
+        if y_max > 0:
+            self.y_slice_slider.setRange(0, y_max - 1)
+            self.y_slice_slider.setValue(y_max // 2)
+            self.current_slice['y'] = y_max // 2
+        if z_max > 0:
+            self.z_slice_slider.setRange(0, z_max - 1)
+            self.z_slice_slider.setValue(z_max // 2)
+            self.current_slice['z'] = z_max // 2
 
     def onROISelectionChanged(self):
         """Handle ROI selection change - regenerate trajectories for selected ROIs."""
         self.updateVisualization()
 
     def getSelectedROIs(self):
-        """Get list of selected ROI names."""
-        selected = []
-        for roi_name, checkbox in self.roi_checkboxes.items():
-            if roi_name != '_no_roi' and isinstance(checkbox, QCheckBox) and checkbox.isChecked():
-                selected.append(roi_name)
-        return selected
+        """Get list of all ROI names (all ROIs are automatically selected)."""
+        if self.main_window and hasattr(self.main_window, 'viewer'):
+            rois = self.main_window.viewer.rois if hasattr(self.main_window.viewer, 'rois') else {}
+            return list(rois.keys())
+        return []
 
     def generateTrajectory(self):
         """Generate fiber trajectory for selected ROIs."""
@@ -4028,6 +4120,8 @@ class VisualizationTab(QWidget):
 
                         if initial_centers is None or len(initial_centers) == 0:
                             self.updateMainStatus(f"[{roi_name}] No detected centers found, using Poisson disk sampling...")
+                            # Get Vf map from analysis tab if available
+                            vf_map, vf_roi_bounds = self._getVfMapFromAnalysisTab()
                             # Fall back to Poisson disk sampling
                             fiber_traj.initialize(
                                 shape=roi_shape,
@@ -4035,7 +4129,9 @@ class VisualizationTab(QWidget):
                                 fiber_volume_fraction=volume_fraction,
                                 scale=1.0,
                                 seed=42 + hash(roi_name) % 1000,
-                                reference_vector=reference_vector
+                                reference_vector=reference_vector,
+                                vf_map=vf_map,
+                                vf_roi_bounds=vf_roi_bounds
                             )
                         else:
                             self.updateMainStatus(f"[{roi_name}] Using {len(initial_centers)} detected fiber centers...")
@@ -4094,13 +4190,17 @@ class VisualizationTab(QWidget):
                     else:
                         # Use Poisson disk sampling (original behavior)
                         self.updateMainStatus(f"[{roi_name}] Creating fiber distribution...")
+                        # Get Vf map from analysis tab if available
+                        vf_map, vf_roi_bounds = self._getVfMapFromAnalysisTab()
                         fiber_traj.initialize(
                             shape=roi_shape,
                             fiber_diameter=fiber_diameter,
                             fiber_volume_fraction=volume_fraction,
                             scale=1.0,
                             seed=42 + hash(roi_name) % 1000,
-                            reference_vector=reference_vector
+                            reference_vector=reference_vector,
+                            vf_map=vf_map,
+                            vf_roi_bounds=vf_roi_bounds
                         )
 
                     # Get resample settings
@@ -4211,6 +4311,9 @@ class VisualizationTab(QWidget):
                 status_callback=lambda msg: self.updateMainStatus(msg)
             )
 
+            # Get Vf map from analysis tab if available
+            vf_map, vf_roi_bounds = self._getVfMapFromAnalysisTab()
+
             # Use Poisson disk sampling
             self.fiber_trajectory.initialize(
                 shape=self.volume_shape,
@@ -4218,7 +4321,9 @@ class VisualizationTab(QWidget):
                 fiber_volume_fraction=volume_fraction,
                 scale=1.0,
                 seed=42,
-                reference_vector=reference_vector
+                reference_vector=reference_vector,
+                vf_map=vf_map,
+                vf_roi_bounds=vf_roi_bounds
             )
 
             # Get resample settings
@@ -4269,7 +4374,12 @@ class VisualizationTab(QWidget):
                 self.stats_label.setText(stats_text)
 
         self.export_screenshot_btn.setEnabled(True)
+        self.export_vtk_btn.setEnabled(True)
         self.trajectory_histogram_btn.setEnabled(True)
+
+        # Update slice sliders to center of trajectory bounds before visualization
+        self._updateSliceSlidersToTrajectoryBounds()
+
         self.updateVisualization()
 
         # Update status to complete
@@ -4796,8 +4906,11 @@ class VisualizationTab(QWidget):
                     roi_z_min, roi_z_max, roi_y_min, roi_y_max, roi_x_min, roi_x_max = bounds
                     roi_height = roi_y_max - roi_y_min
                     roi_width = roi_x_max - roi_x_min
+                    roi_depth = roi_z_max - roi_z_min
                 else:
-                    roi_height = roi_width = 1000  # fallback
+                    # Use trajectory length as fallback for depth
+                    roi_depth = len(trajectories)
+                    roi_height = roi_width = 1000  # fallback for width/height
 
                 # Get propagation axis and fiber diameter for circle rendering
                 prop_axis = getattr(fiber_traj, 'propagation_axis', 2)
@@ -4806,7 +4919,9 @@ class VisualizationTab(QWidget):
 
                 # XY Slice - find trajectory slice at z_pos (relative to ROI)
                 roi_z_pos = z_pos - z_offset
-                if 0 <= roi_z_pos < len(trajectories):
+                num_slices = len(trajectories)
+                # Check against actual trajectory length (primary constraint)
+                if 0 <= roi_z_pos < num_slices:
                     z, points = trajectories[roi_z_pos]
                     n_points = len(points)
                     # Ensure angles array has correct length (may differ when new fibers are added dynamically)
@@ -4835,8 +4950,9 @@ class VisualizationTab(QWidget):
                 xz_fiber_indices_all = []  # track fiber indices for color_by_fiber
                 xz_circle_centers = []
 
-                # Only process if y_pos is within ROI range
-                if 0 <= roi_y_pos < roi_height + tolerance:
+                # Always process - let the mask filter out points that don't match
+                # This ensures we don't miss points due to incorrect bounds calculation
+                if roi_y_pos >= -tolerance:
                     for slice_idx, (z, points) in enumerate(trajectories):
                         mask = np.abs(points[:, 1] - roi_y_pos) < tolerance
                         if np.any(mask):
@@ -4880,8 +4996,8 @@ class VisualizationTab(QWidget):
                 yz_y_all, yz_z_all, yz_angles_all, yz_azimuths_all = [], [], [], []
                 yz_fiber_indices_all = []  # track fiber indices for color_by_fiber
                 yz_circle_centers = []
-                # Only process if x_pos is within ROI range
-                if 0 <= roi_x_pos < roi_width + tolerance:
+                # Always process - let the mask filter out points that don't match
+                if roi_x_pos >= -tolerance:
                     for slice_idx, (z, points) in enumerate(trajectories):
                         mask = np.abs(points[:, 0] - roi_x_pos) < tolerance
                         if np.any(mask):
@@ -5062,11 +5178,23 @@ class VisualizationTab(QWidget):
                 if not isinstance(roi_data, dict):
                     continue
                 bounds = roi_data.get('bounds', None)
+                offset = roi_data.get('offset', (0, 0, 0))
+                z_offset, y_offset, x_offset = offset
                 if bounds:
                     roi_z_min, roi_z_max, roi_y_min, roi_y_max, roi_x_min, roi_x_max = bounds
                     x_max = max(x_max, roi_x_max)
                     y_max = max(y_max, roi_y_max)
                     z_max = max(z_max, roi_z_max)
+                else:
+                    # Compute bounds from trajectory data when bounds not available
+                    fiber_traj = roi_data.get('trajectory')
+                    if fiber_traj and fiber_traj.trajectories:
+                        trajectories = fiber_traj.trajectories
+                        z_max = max(z_max, z_offset + len(trajectories))
+                        for _, points in trajectories:
+                            if len(points) > 0:
+                                x_max = max(x_max, x_offset + np.max(points[:, 0]))
+                                y_max = max(y_max, y_offset + np.max(points[:, 1]))
             if x_max > 0 and y_max > 0 and z_max > 0:
                 ax_xy.set_xlim(0, x_max)
                 ax_xy.set_ylim(0, y_max)
@@ -5210,6 +5338,139 @@ class VisualizationTab(QWidget):
         angle_data['yz_projection'] = np.array(angle_data['yz_projection']) if angle_data['yz_projection'] else None
 
         return angle_data
+
+    def exportTrajectoryToVTK(self):
+        """Export fiber trajectories to VTK format for Paraview visualization."""
+        import pyvista as pv
+
+        if self.fiber_trajectory is None and not self.roi_trajectories:
+            QMessageBox.warning(self, "No Data", "No fiber trajectory data to export.")
+            return
+
+        # Get save filename
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self, "Export Fiber Trajectory", "",
+            "VTK PolyData (*.vtp);;Legacy VTK (*.vtk);;All Files (*)"
+        )
+        if not filename:
+            return
+
+        # Ensure extension
+        if not filename.lower().endswith(('.vtp', '.vtk')):
+            filename += '.vtp'
+
+        try:
+            # Build polydata from trajectories
+            all_points = []
+            all_lines = []
+            all_tilt_angles = []
+            all_azimuth_angles = []
+            all_fiber_ids = []
+            point_offset = 0
+            global_fiber_idx = 0
+
+            # Process all ROI trajectories
+            trajectories_to_process = []
+            if self.roi_trajectories:
+                for roi_name, roi_data in self.roi_trajectories.items():
+                    if not isinstance(roi_data, dict):
+                        continue
+                    fiber_traj = roi_data['trajectory']
+                    offset = roi_data['offset']  # (z_offset, y_offset, x_offset)
+                    trajectories_to_process.append((fiber_traj, offset, roi_name))
+            elif self.fiber_trajectory is not None:
+                trajectories_to_process.append((self.fiber_trajectory, (0, 0, 0), "main"))
+
+            for fiber_traj, offset, roi_name in trajectories_to_process:
+                z_offset, y_offset, x_offset = offset
+                trajectories = fiber_traj.trajectories
+                angles = fiber_traj.angles if fiber_traj.angles else []
+                azimuths = getattr(fiber_traj, 'azimuths', None)
+                if azimuths is None:
+                    azimuths = []
+
+                if not trajectories:
+                    continue
+
+                # Get number of fibers from first slice
+                n_fibers = len(trajectories[0][1]) if trajectories else 0
+
+                # Build fiber lines (each fiber is a polyline through all slices)
+                for fiber_idx in range(n_fibers):
+                    fiber_points = []
+                    fiber_tilts = []
+                    fiber_azimuths = []
+
+                    for slice_idx, (z, points) in enumerate(trajectories):
+                        if fiber_idx < len(points):
+                            pt = points[fiber_idx]
+                            # Convert to global coordinates (X, Y, Z for Paraview)
+                            fiber_points.append([
+                                pt[0] + x_offset,  # X
+                                pt[1] + y_offset,  # Y
+                                slice_idx + z_offset  # Z
+                            ])
+
+                            # Get angles for this point
+                            if slice_idx < len(angles) and fiber_idx < len(angles[slice_idx]):
+                                fiber_tilts.append(angles[slice_idx][fiber_idx])
+                            else:
+                                fiber_tilts.append(0.0)
+
+                            if slice_idx < len(azimuths) and fiber_idx < len(azimuths[slice_idx]):
+                                fiber_azimuths.append(azimuths[slice_idx][fiber_idx])
+                            else:
+                                fiber_azimuths.append(0.0)
+
+                    if len(fiber_points) > 1:
+                        # Add points
+                        n_pts = len(fiber_points)
+                        all_points.extend(fiber_points)
+                        all_tilt_angles.extend(fiber_tilts)
+                        all_azimuth_angles.extend(fiber_azimuths)
+                        all_fiber_ids.extend([global_fiber_idx] * n_pts)
+
+                        # Add line connectivity
+                        line = [n_pts] + list(range(point_offset, point_offset + n_pts))
+                        all_lines.extend(line)
+                        point_offset += n_pts
+                        global_fiber_idx += 1
+
+            if not all_points:
+                QMessageBox.warning(self, "No Data", "No valid fiber trajectory data to export.")
+                return
+
+            # Create PyVista PolyData
+            points_array = np.array(all_points)
+            lines_array = np.array(all_lines)
+
+            polydata = pv.PolyData()
+            polydata.points = points_array
+            polydata.lines = lines_array
+
+            # Add scalar arrays for coloring in Paraview
+            polydata.point_data['TiltAngle'] = np.array(all_tilt_angles)
+            polydata.point_data['AzimuthAngle'] = np.array(all_azimuth_angles)
+            polydata.point_data['FiberID'] = np.array(all_fiber_ids)
+
+            # Save to file
+            polydata.save(filename)
+
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Fiber trajectories exported to:\n{filename}\n\n"
+                f"Total fibers: {global_fiber_idx}\n"
+                f"Total points: {len(all_points)}\n\n"
+                "Available scalar arrays in Paraview:\n"
+                "- TiltAngle: Fiber tilt angle (degrees)\n"
+                "- AzimuthAngle: Fiber azimuth angle (degrees)\n"
+                "- FiberID: Unique fiber identifier"
+            )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
 
     def showExportScreenshotDialog(self):
         """Show export screenshot dialog."""
@@ -5822,6 +6083,50 @@ class AnalysisTab(QWidget):
 
         toolbar_layout.addWidget(insegt_group)
 
+        # Fiber Volume Fraction Group
+        vf_group = QGroupBox("Volume Fraction")
+        vf_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        vf_layout = QHBoxLayout(vf_group)
+
+        self.vf_settings_btn = RibbonButton("Vf\nSettings")
+        self.vf_settings_btn.setToolTip("Configure volume fraction calculation parameters")
+        self.vf_settings_btn.clicked.connect(self.openVfSettings)
+        vf_layout.addWidget(self.vf_settings_btn)
+
+        self.vf_compute_btn = RibbonButton("Compute\nVf")
+        self.vf_compute_btn.setToolTip(
+            "Compute local fiber volume fraction from segmentation.\n"
+            "Uses Otsu or InSegt segmentation result."
+        )
+        self.vf_compute_btn.clicked.connect(self.computeVf)
+        vf_layout.addWidget(self.vf_compute_btn)
+
+        toolbar_layout.addWidget(vf_group)
+
+        # Export Group
+        export_group = QGroupBox("Export")
+        export_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        export_layout = QHBoxLayout(export_group)
+
+        self.export_orientation_btn = RibbonButton("Export\nOrientation")
+        self.export_orientation_btn.setToolTip(
+            "Export orientation data to VTK format for Paraview.\n"
+            "Includes tilt angle, azimuth angle, and orientation vectors."
+        )
+        self.export_orientation_btn.clicked.connect(self.exportOrientationToVTK)
+        self.export_orientation_btn.setEnabled(False)
+        export_layout.addWidget(self.export_orientation_btn)
+
+        self.export_vf_btn = RibbonButton("Export\nVf Map")
+        self.export_vf_btn.setToolTip(
+            "Export fiber volume fraction map to VTK format."
+        )
+        self.export_vf_btn.clicked.connect(self.exportVfMapToVTK)
+        self.export_vf_btn.setEnabled(False)
+        export_layout.addWidget(self.export_vf_btn)
+
+        toolbar_layout.addWidget(export_group)
+
         toolbar_layout.addStretch()
 
         layout.addWidget(toolbar)
@@ -5852,6 +6157,21 @@ class AnalysisTab(QWidget):
         self.insegt_labels = None
         self._insegt_scale = 0.5  # Store scale used during labeling
         self._insegt_labels_ready = False  # Flag to enable Run button
+
+        # Vf (Volume Fraction) settings
+        self.vf_settings = {
+            'window_size': 50,
+            'use_gaussian': False,
+            'gaussian_sigma': 10.0,
+        }
+
+        # Vf result storage
+        self.vf_map = None
+        self.vf_segmentation = None
+
+        # Segmentation volume (stored from Fiber Detection or InSegt)
+        self.segmentation_volume = None
+        self.segmentation_roi_bounds = None
 
     def openFiberDetectionSettings(self):
         """Open fiber detection settings dialog"""
@@ -5908,6 +6228,7 @@ class AnalysisTab(QWidget):
 
             # Detect fiber centers in all slices
             all_slice_results = {}
+            all_segmentation_labels = {}  # Store labels separately for Vf calculation
             total_fibers = 0
             all_diameters = []
 
@@ -5927,31 +6248,24 @@ class AnalysisTab(QWidget):
                 if threshold_method == 'percentile':
                     threshold_percentile = self.fiber_detection_settings.get('threshold_percentile', 50.0)
 
-                # Detect fiber centers (with labels if watershed display is enabled)
-                if show_watershed:
-                    centers, diameters, labels = detect_fiber_centers(
-                        slice_image,
-                        min_diameter=self.fiber_detection_settings['min_diameter'],
-                        max_diameter=self.fiber_detection_settings['max_diameter'],
-                        min_distance=self.fiber_detection_settings['min_distance'],
-                        return_labels=True,
-                        threshold_percentile=threshold_percentile
-                    )
-                else:
-                    centers, diameters = detect_fiber_centers(
-                        slice_image,
-                        min_diameter=self.fiber_detection_settings['min_diameter'],
-                        max_diameter=self.fiber_detection_settings['max_diameter'],
-                        min_distance=self.fiber_detection_settings['min_distance'],
-                        threshold_percentile=threshold_percentile
-                    )
-                    labels = None
+                # Always get labels for Vf calculation, regardless of visualization setting
+                centers, diameters, labels = detect_fiber_centers(
+                    slice_image,
+                    min_diameter=self.fiber_detection_settings['min_diameter'],
+                    max_diameter=self.fiber_detection_settings['max_diameter'],
+                    min_distance=self.fiber_detection_settings['min_distance'],
+                    return_labels=True,
+                    threshold_percentile=threshold_percentile
+                )
+
+                # Always store labels for Vf calculation
+                all_segmentation_labels[z] = labels
 
                 if len(centers) > 0:
                     all_slice_results[z] = {
                         'centers': centers,
                         'diameters': diameters,
-                        'labels': labels
+                        'labels': labels if show_watershed else None  # Only store for visualization if enabled
                     }
                     total_fibers += len(centers)
                     all_diameters.extend(diameters.tolist())
@@ -5971,6 +6285,16 @@ class AnalysisTab(QWidget):
                 'roi_bounds': bounds,
                 'settings': self.fiber_detection_settings.copy()
             }
+
+            # Build and store segmentation volume for Vf calculation
+            # Use all_segmentation_labels which always has labels regardless of visualization setting
+            seg_volume = np.zeros((n_slices, y_max - y_min, x_max - x_min), dtype=np.uint8)
+            for z, labels in all_segmentation_labels.items():
+                if labels is not None:
+                    seg_volume[z - z_min] = (labels > 0).astype(np.uint8)
+
+            self.segmentation_volume = seg_volume
+            self.segmentation_roi_bounds = bounds
 
             # Trigger visualization update
             main_window.viewer.show_fiber_detection = True
@@ -6012,10 +6336,9 @@ class AnalysisTab(QWidget):
     def openInSegtLabeling(self):
         """Open InSegt interactive labeling tool for the current slice.
 
-        Launches InSegt in a subprocess to avoid Qt conflicts.
+        Opens InSegt in the same process as a modal-like window.
         """
-        import subprocess
-        import tempfile
+        import cv2
         from pathlib import Path
 
         main_window = getattr(self, 'main_window', None)
@@ -6054,17 +6377,6 @@ class AnalysisTab(QWidget):
         QApplication.processEvents()
 
         try:
-            # Create temp directory for communication
-            self._insegt_temp_dir = tempfile.mkdtemp(prefix="insegt_")
-            temp_dir = Path(self._insegt_temp_dir)
-
-            # Save ROI image to temp file
-            image_path = temp_dir / "slice_image.npy"
-            np.save(str(image_path), slice_image)
-
-            # Get path to the runner script
-            script_path = Path(__file__).parent / "insegt" / "run_insegt_gui.py"
-
             # Get settings from insegt_settings
             insegt_scale = self.insegt_settings.get('scale', 0.5)
             sigmas = self.insegt_settings.get('sigmas', [1, 2])
@@ -6074,120 +6386,106 @@ class AnalysisTab(QWidget):
             training_patches = self.insegt_settings.get('training_patches', 10000)
 
             self._insegt_scale = insegt_scale
+            self._insegt_slice_z = current_z
 
-            # Build command
-            cmd = [
-                sys.executable,
-                str(script_path),
-                str(image_path),
-                str(temp_dir),
-                "--sigmas", ",".join(str(s) for s in sigmas),
-                "--patch-size", str(patch_size),
-                "--branching-factor", str(branching_factor),
-                "--number-layers", str(number_layers),
-                "--training-patches", str(training_patches),
-                "--scale", str(insegt_scale)
-            ]
+            # Convert to uint8 if needed
+            if slice_image.dtype == np.uint16:
+                image_uint8 = (slice_image / 256).astype(np.uint8)
+            elif slice_image.dtype != np.uint8:
+                if slice_image.max() > 0:
+                    image_uint8 = ((slice_image - slice_image.min()) / (slice_image.max() - slice_image.min()) * 255).astype(np.uint8)
+                else:
+                    image_uint8 = np.zeros_like(slice_image, dtype=np.uint8)
+            else:
+                image_uint8 = slice_image
 
-            # Launch subprocess
-            self._insegt_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
+            # Downscale image for faster processing
+            if insegt_scale != 1.0:
+                image_scaled = cv2.resize(image_uint8, None, fx=insegt_scale, fy=insegt_scale, interpolation=cv2.INTER_AREA)
+            else:
+                image_scaled = image_uint8
+
+            # Import InSegt components
+            from acsc.insegt.fiber_model import FiberSegmentationModel
+            from acsc.insegt.annotators.dual_panel_annotator import DualPanelAnnotator
+
+            # Build model
+            main_window.status_label.setText("Building InSegt model...")
+            QApplication.processEvents()
+
+            model = FiberSegmentationModel(
+                sigmas=sigmas,
+                patch_size=patch_size,
+                branching_factor=branching_factor,
+                number_layers=number_layers,
+                training_patches=training_patches
             )
+            model.build_from_image(image_scaled)
+            model.set_image(image_scaled)
+
+            # Store model for later use
+            self._insegt_model = model
+
+            # Create annotator window
+            self._insegt_annotator = DualPanelAnnotator(image_scaled, model)
+            self._insegt_annotator.setWindowTitle(f"InSegt Labeling - Slice {current_z}")
+            self._insegt_annotator.setWindowFlags(
+                self._insegt_annotator.windowFlags() | Qt.WindowStaysOnTopHint
+            )
+
+            # Connect close event to capture labels
+            original_close = self._insegt_annotator.closeEvent
+            def on_close(event):
+                self._onInSegtClosed()
+                original_close(event)
+            self._insegt_annotator.closeEvent = on_close
+
+            # Show window
+            self._insegt_annotator.show()
+            self._insegt_annotator.raise_()
+            self._insegt_annotator.activateWindow()
 
             main_window.status_label.setText(
                 f"InSegt labeling opened for slice {current_z}. "
                 "Close the InSegt window when done."
             )
 
-            # Store current slice info
-            self._insegt_slice_z = current_z
-
-            # Start timer to check for completion
-            self._insegt_check_timer = QTimer()
-            self._insegt_check_timer.timeout.connect(self._checkInSegtProcess)
-            self._insegt_check_timer.start(1000)  # Check every second
-
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             QMessageBox.critical(self, "Error", f"Failed to open InSegt labeling:\n{str(e)}")
             main_window.status_label.setText(f"InSegt error: {str(e)}")
 
-    def _checkInSegtProcess(self):
-        """Check if InSegt subprocess has completed."""
-        from pathlib import Path
-
+    def _onInSegtClosed(self):
+        """Handle InSegt window being closed - capture labels."""
         main_window = getattr(self, 'main_window', None)
 
-        if not hasattr(self, '_insegt_process') or self._insegt_process is None:
-            if hasattr(self, '_insegt_check_timer'):
-                self._insegt_check_timer.stop()
-            return
-
-        # Check if process is still running
-        poll = self._insegt_process.poll()
-        if poll is None:
-            # Still running
-            return
-
-        # Process finished - stop timer
-        self._insegt_check_timer.stop()
-
-        # Check status file
-        temp_dir = Path(self._insegt_temp_dir)
-        status_file = temp_dir / "insegt_status.txt"
-        labels_file = temp_dir / "insegt_labels.npy"
-
         try:
-            if status_file.exists():
-                with open(status_file, 'r') as f:
-                    lines = f.read().strip().split('\n')
+            if hasattr(self, '_insegt_annotator') and self._insegt_annotator is not None:
+                # Get labels from annotator
+                self.insegt_labels = self._insegt_annotator.getLabels()
+                self._insegt_labels_ready = True
 
-                status = lines[0] if len(lines) > 0 else "unknown"
+                # Enable Run button
+                self.insegt_run_btn.setEnabled(True)
 
-                if status == "completed":
-                    labels_path = lines[1] if len(lines) > 1 else str(labels_file)
-
-                    # Load labels
-                    if Path(labels_path).exists():
-                        self.insegt_labels = np.load(labels_path)
-                        self._insegt_labels_ready = True
-
-                        # Enable Run button
-                        self.insegt_run_btn.setEnabled(True)
-
-                        if main_window:
-                            main_window.status_label.setText(
-                                f"InSegt labeling completed. Click 'Run' to detect fibers."
-                            )
-
-                elif status == "error":
-                    error_msg = lines[1] if len(lines) > 1 else "Unknown error"
-                    QMessageBox.warning(self, "InSegt Error", f"InSegt process error:\n{error_msg}")
-                    if main_window:
-                        main_window.status_label.setText(f"InSegt error: {error_msg}")
-
-            else:
-                # No status file - check stderr
-                stderr = self._insegt_process.stderr.read().decode() if self._insegt_process.stderr else ""
-                if stderr:
-                    print(f"InSegt stderr: {stderr}")
                 if main_window:
-                    main_window.status_label.setText("InSegt process ended (no status)")
+                    main_window.status_label.setText(
+                        f"InSegt labeling completed. Click 'Run' to detect fibers."
+                    )
+
+                print(f"InSegt labels captured: shape={self.insegt_labels.shape}")
 
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Error processing InSegt results:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "Error", f"Error capturing InSegt labels:\n{str(e)}")
             if main_window:
                 main_window.status_label.setText(f"InSegt error: {str(e)}")
 
         finally:
-            # Cleanup
-            self._insegt_process = None
-
-            # Optionally cleanup temp directory (keep for debugging)
-            # import shutil
-            # shutil.rmtree(self._insegt_temp_dir, ignore_errors=True)
+            # Cleanup annotator reference
+            self._insegt_annotator = None
 
     def runInSegt(self):
         """Apply InSegt model to all slices using the labeled data."""
@@ -6385,6 +6683,16 @@ class AnalysisTab(QWidget):
                 'settings': self.fiber_detection_settings.copy()
             }
 
+            # Build and store segmentation volume for Vf calculation
+            seg_volume = np.zeros((n_slices, y_max - y_min, x_max - x_min), dtype=np.uint8)
+            for z, slice_data in all_slice_results.items():
+                labels = slice_data.get('labels')
+                if labels is not None:
+                    seg_volume[z - z_min] = (labels > 0).astype(np.uint8)
+
+            self.segmentation_volume = seg_volume
+            self.segmentation_roi_bounds = bounds
+
             main_window.viewer.show_fiber_detection = True
             main_window.viewer.renderVolume()
 
@@ -6433,6 +6741,118 @@ class AnalysisTab(QWidget):
                 QMessageBox.information(self, "Success", f"Model saved to:\n{filepath}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save model:\n{str(e)}")
+
+    def openVfSettings(self):
+        """Open volume fraction settings dialog."""
+        dialog = VfSettingsDialog(self, self.vf_settings)
+        if dialog.exec() == QDialog.Accepted:
+            self.vf_settings = dialog.getSettings()
+
+    def computeVf(self):
+        """Compute local fiber volume fraction from existing segmentation."""
+        from acsc.segment import (
+            estimate_local_vf,
+            estimate_vf_distribution,
+        )
+
+        main_window = getattr(self, 'main_window', None)
+        if not main_window or main_window.current_volume is None:
+            QMessageBox.warning(self, "Error", "No volume loaded.")
+            return
+
+        # Check if segmentation is available
+        if self.segmentation_volume is None or self.segmentation_roi_bounds is None:
+            QMessageBox.warning(self, "Error",
+                "No segmentation available.\n\n"
+                "Please run 'Detect Fibers' or 'InSegt Run' first.")
+            return
+
+        segmentation = self.segmentation_volume
+        z_min, z_max, y_min, y_max, x_min, x_max = self.segmentation_roi_bounds
+        n_slices = z_max - z_min
+
+        main_window.status_label.setText(f"Computing Vf for {n_slices} slices...")
+        main_window.showProgress(True)
+        main_window.progress_bar.setRange(0, 100)
+        main_window.progress_bar.setValue(20)
+        QApplication.processEvents()
+
+        try:
+            # Compute local Vf
+            main_window.status_label.setText("Computing local Vf distribution...")
+            QApplication.processEvents()
+
+            window_size = self.vf_settings.get('window_size', 50)
+            use_gaussian = self.vf_settings.get('use_gaussian', False)
+            gaussian_sigma = self.vf_settings.get('gaussian_sigma', 10.0) if use_gaussian else None
+
+            vf_map = estimate_local_vf(
+                segmentation,
+                fiber_label=1,
+                window_size=window_size,
+                gaussian_sigma=gaussian_sigma
+            )
+
+            main_window.progress_bar.setValue(70)
+            QApplication.processEvents()
+
+            # Step 4: Compute statistics
+            hist, bin_edges, stats = estimate_vf_distribution(
+                segmentation,
+                fiber_label=1,
+                window_size=window_size,
+                gaussian_sigma=gaussian_sigma
+            )
+
+            main_window.progress_bar.setValue(100)
+            main_window.showProgress(False)
+
+            # Store results
+            self.vf_map = vf_map
+            self.vf_segmentation = segmentation
+            self.vf_stats = stats
+            self.vf_roi_bounds = (z_min, z_max, y_min, y_max, x_min, x_max)
+
+            # Store in viewer for display
+            main_window.viewer.vf_map = vf_map
+            main_window.viewer.vf_roi_bounds = self.vf_roi_bounds
+            main_window.viewer.show_vf_overlay = True
+
+            # Add Vf toggle to pipeline
+            if hasattr(main_window, 'addVfToggle'):
+                main_window.addVfToggle()
+
+            main_window.viewer.renderVolume()
+
+            # Show results dialog
+            smoothing_info = f"Gaussian sigma: {gaussian_sigma} px" if use_gaussian else "Box averaging"
+            msg = (
+                f"Volume Fraction Analysis Complete\n\n"
+                f"Window size: {window_size} px\n"
+                f"Smoothing: {smoothing_info}\n\n"
+                f"Results:\n"
+                f"  Global Vf: {stats['global_vf']*100:.1f}%\n"
+                f"  Mean local Vf: {stats['mean']*100:.1f}%\n"
+                f"  Std deviation: {stats['std']*100:.1f}%\n"
+                f"  Min Vf: {stats['min']*100:.1f}%\n"
+                f"  Max Vf: {stats['max']*100:.1f}%"
+            )
+
+            main_window.status_label.setText(
+                f"Vf computed: mean={stats['mean']*100:.1f}%, global={stats['global_vf']*100:.1f}%"
+            )
+
+            # Enable Vf export button
+            self.export_vf_btn.setEnabled(True)
+
+            QMessageBox.information(self, "Volume Fraction Results", msg)
+
+        except Exception as e:
+            main_window.showProgress(False)
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Vf computation failed:\n{str(e)}")
+            main_window.status_label.setText(f"Vf error: {str(e)}")
 
     def toggleROIEdit(self, checked):
         """Toggle ROI editing mode"""
@@ -6590,6 +7010,9 @@ class AnalysisTab(QWidget):
                 self.edit_range_btn.setEnabled(True)
                 self.histogram_btn.setEnabled(True)
 
+                # Enable export buttons
+                self.export_orientation_btn.setEnabled(True)
+
                 # Enable histogram button in Simulation tab as well
                 if hasattr(main_window, 'simulation_tab'):
                     main_window.simulation_tab.histogram_btn.setEnabled(True)
@@ -6636,6 +7059,166 @@ class AnalysisTab(QWidget):
         if dialog.exec() == QDialog.Accepted:
             # Show histogram panel after dialog is accepted
             main_window.showHistogramPanel(dialog.getConfiguration())
+
+    def exportOrientationToVTK(self):
+        """Export orientation volume data to VTK format for Paraview."""
+        import pyvista as pv
+
+        main_window = getattr(self, 'main_window', None)
+        if not main_window:
+            QMessageBox.warning(self, "Error", "No main window reference.")
+            return
+
+        orientation_data = main_window.orientation_data
+        if not orientation_data or 'theta' not in orientation_data:
+            QMessageBox.warning(self, "No Data", "No orientation data available.\nPlease compute orientation first.")
+            return
+
+        # Show selection dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Export Orientation Data")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+
+        # Description
+        desc_label = QLabel("Select orientation data to export:")
+        layout.addWidget(desc_label)
+
+        # Checkboxes for each orientation type
+        theta_check = QCheckBox("Theta (Azimuthal angle)")
+        theta_check.setChecked(True)
+        layout.addWidget(theta_check)
+
+        phi_check = QCheckBox("Phi (Elevation angle)")
+        phi_check.setChecked(True)
+        layout.addWidget(phi_check)
+
+        reference_check = QCheckBox("Reference (Angle from reference axis)")
+        reference_check.setChecked(True)
+        reference_check.setEnabled(orientation_data.get('reference') is not None)
+        layout.addWidget(reference_check)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_btn = QPushButton("Export")
+        cancel_btn = QPushButton("Cancel")
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        # Check if at least one is selected
+        if not (theta_check.isChecked() or phi_check.isChecked() or reference_check.isChecked()):
+            QMessageBox.warning(self, "No Selection", "Please select at least one orientation type to export.")
+            return
+
+        # Get save filename
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Orientation Volume", "",
+            "VTK ImageData (*.vti);;Legacy VTK (*.vtk);;All Files (*)"
+        )
+        if not filename:
+            return
+
+        if not filename.lower().endswith(('.vti', '.vtk')):
+            filename += '.vti'
+
+        try:
+            theta = orientation_data['theta']
+            phi = orientation_data['phi']
+            reference = orientation_data.get('reference', None)
+
+            # Create VTK ImageData (uniform grid)
+            grid = pv.ImageData()
+            grid.dimensions = np.array(theta.shape) + 1  # VTK needs n+1 for cell data
+            grid.spacing = (1, 1, 1)
+
+            exported_fields = []
+
+            # Add selected scalar arrays
+            if theta_check.isChecked():
+                grid.cell_data['Theta'] = theta.flatten(order='F')
+                exported_fields.append("Theta (Azimuthal angle)")
+
+            if phi_check.isChecked():
+                grid.cell_data['Phi'] = phi.flatten(order='F')
+                exported_fields.append("Phi (Elevation angle)")
+
+            if reference_check.isChecked() and reference is not None:
+                grid.cell_data['Reference'] = reference.flatten(order='F')
+                exported_fields.append("Reference (Angle from reference axis)")
+
+            grid.save(filename)
+
+            fields_str = "\n".join(f"- {f}" for f in exported_fields)
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Orientation volume exported to:\n{filename}\n\n"
+                f"Volume shape: {theta.shape}\n\n"
+                f"Exported fields:\n{fields_str}"
+            )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
+
+    def exportVfMapToVTK(self):
+        """Export fiber volume fraction map to VTK format."""
+        import pyvista as pv
+
+        if not hasattr(self, 'vf_map') or self.vf_map is None:
+            QMessageBox.warning(self, "No Data", "No Vf map available.\nPlease compute Vf first.")
+            return
+
+        # Get save filename
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Vf Map", "",
+            "VTK ImageData (*.vti);;Legacy VTK (*.vtk);;All Files (*)"
+        )
+        if not filename:
+            return
+
+        if not filename.lower().endswith(('.vti', '.vtk')):
+            filename += '.vti'
+
+        try:
+            vf_map = self.vf_map
+
+            # Create VTK ImageData
+            grid = pv.ImageData()
+            grid.dimensions = np.array(vf_map.shape) + 1
+            grid.spacing = (1, 1, 1)
+
+            # Add Vf as cell data
+            grid.cell_data['VolumeFraction'] = vf_map.flatten(order='F')
+
+            # Also add percentage for convenience
+            grid.cell_data['Vf_Percent'] = (vf_map * 100).flatten(order='F')
+
+            grid.save(filename)
+
+            stats = self.vf_stats if hasattr(self, 'vf_stats') else {}
+
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Vf map exported to:\n{filename}\n\n"
+                f"Volume shape: {vf_map.shape}\n"
+                f"Vf range: [{vf_map.min()*100:.1f}%, {vf_map.max()*100:.1f}%]\n\n"
+                "Available data in Paraview:\n"
+                "- VolumeFraction: Fiber volume fraction (0-1)\n"
+                "- Vf_Percent: Fiber volume fraction (%)"
+            )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
+
 
 class HistogramDialog(QDialog):
     def __init__(self, main_window, analysis_tab):
@@ -7873,6 +8456,87 @@ class InSegtSettingsDialog(QDialog):
         }
 
 
+class VfSettingsDialog(QDialog):
+    """Dialog for Fiber Volume Fraction calculation settings."""
+    def __init__(self, parent=None, settings=None):
+        super().__init__(parent)
+        self.setWindowTitle("Volume Fraction Settings")
+        self.setModal(True)
+        self.setMinimumWidth(350)
+
+        self.settings = settings or {
+            'window_size': 50,
+            'use_gaussian': False,
+            'gaussian_sigma': 10.0,
+        }
+
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Info label
+        info_label = QLabel(
+            "Computes local fiber volume fraction (Vf) from\n"
+            "existing segmentation results (Fiber Detection or InSegt)."
+        )
+        info_label.setStyleSheet("color: #666; font-style: italic;")
+        layout.addWidget(info_label)
+
+        # Local Vf Calculation Group
+        vf_group = QGroupBox("Local Vf Calculation")
+        vf_layout = QFormLayout(vf_group)
+
+        self.window_spin = QSpinBox()
+        self.window_spin.setRange(5, 500)
+        self.window_spin.setValue(self.settings.get('window_size', 50))
+        self.window_spin.setSuffix(" px")
+        self.window_spin.setToolTip("Window size for local Vf averaging (box filter)")
+        vf_layout.addRow("Window Size:", self.window_spin)
+
+        self.use_gaussian_check = QCheckBox("Use Gaussian smoothing")
+        self.use_gaussian_check.setChecked(self.settings.get('use_gaussian', False))
+        self.use_gaussian_check.stateChanged.connect(self._onGaussianChanged)
+        vf_layout.addRow("", self.use_gaussian_check)
+
+        self.gaussian_spin = QDoubleSpinBox()
+        self.gaussian_spin.setRange(1.0, 100.0)
+        self.gaussian_spin.setValue(self.settings.get('gaussian_sigma', 10.0))
+        self.gaussian_spin.setSuffix(" px")
+        self.gaussian_spin.setToolTip("Gaussian sigma for smoothing (larger = smoother)")
+        self.gaussian_spin.setEnabled(self.settings.get('use_gaussian', False))
+        vf_layout.addRow("Gaussian Sigma:", self.gaussian_spin)
+
+        layout.addWidget(vf_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+    def _onGaussianChanged(self, state):
+        """Enable/disable gaussian sigma based on checkbox."""
+        # Handle both Qt.CheckState enum and int values
+        if isinstance(state, int):
+            self.gaussian_spin.setEnabled(state == 2)  # Qt.Checked = 2
+        else:
+            self.gaussian_spin.setEnabled(state == Qt.CheckState.Checked)
+
+    def getSettings(self):
+        """Return the current settings."""
+        return {
+            'window_size': self.window_spin.value(),
+            'use_gaussian': self.use_gaussian_check.isChecked(),
+            'gaussian_sigma': self.gaussian_spin.value(),
+        }
+
+
 class FiberDetectionSettingsDialog(QDialog):
     """Dialog for fiber detection settings in Analysis tab"""
     def __init__(self, parent=None, settings=None):
@@ -8870,6 +9534,7 @@ class ACSCMainWindow(QMainWindow):
 
         slider_layout.addStretch()
 
+        self.slider_panel = slider_panel  # Save reference for later use
         self.content_splitter.addWidget(slider_panel)
 
         # Histogram Panel (initially hidden)
@@ -9005,6 +9670,57 @@ class ACSCMainWindow(QMainWindow):
         self.threshold_slider.setValue(default_threshold)
         # valueChanged signal will trigger onThresholdChanged
 
+    def addVfToggle(self):
+        """Add Vf overlay toggle to the pipeline panel."""
+        # Check if already added
+        if hasattr(self, '_vf_toggle_added') and self._vf_toggle_added:
+            return
+
+        # Get slider layout from slider_panel
+        if not hasattr(self, 'slider_panel'):
+            return
+        slider_layout = self.slider_panel.layout()
+
+        # Find the pipeline group
+        pipeline_group = None
+        for i in range(slider_layout.count()):
+            item = slider_layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if isinstance(widget, QGroupBox) and widget.title() == "Pipeline":
+                    pipeline_group = widget
+                    break
+
+        if pipeline_group is None:
+            return
+
+        # Create Vf toggle widget
+        vf_widget = QWidget()
+        vf_layout = QHBoxLayout(vf_widget)
+        vf_layout.setContentsMargins(0, 0, 0, 0)
+        vf_layout.setSpacing(5)
+
+        self.vf_check = QCheckBox("Vf Overlay")
+        self.vf_check.setChecked(True)
+        self.vf_check.stateChanged.connect(self._onVfToggleChanged)
+        vf_layout.addWidget(self.vf_check)
+
+        vf_layout.addStretch()
+
+        # Add to pipeline group layout
+        pipeline_group.layout().addWidget(vf_widget)
+        self._vf_toggle_added = True
+
+    def _onVfToggleChanged(self, state):
+        """Handle Vf overlay toggle change."""
+        if self.viewer:
+            # Handle both Qt.CheckState enum and int values
+            if isinstance(state, int):
+                self.viewer.show_vf_overlay = (state == 2)  # Qt.Checked = 2
+            else:
+                self.viewer.show_vf_overlay = (state == Qt.CheckState.Checked)
+            self.viewer.renderVolume()
+
     def onTabChanged(self, index):
         """Handle tab change to show/hide appropriate controls"""
         # Tab indices: 0=Volume, 1=Analysis, 2=Modelling, 3=Simulation
@@ -9137,6 +9853,7 @@ class ACSCMainWindow(QMainWindow):
         self.progress_bar.setVisible(show)
         if show:
             self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("%p%")  # Reset to default percentage format
 
     def showHistogramPanel(self, config):
         """Show the histogram panel with the given configuration"""
@@ -9152,9 +9869,28 @@ class ACSCMainWindow(QMainWindow):
         self.histogram_panel.setVisible(False)
 
 def main():
+    from acsc.splash import SplashScreen
+
     app = QApplication(sys.argv)
+
+    # Show splash screen
+    splash = SplashScreen()
+    splash.show()
+    QApplication.processEvents()
+
+    # Create main window (this takes time)
+    splash.setMessage("Initializing application...")
+    QApplication.processEvents()
+
     window = ACSCMainWindow()
+
+    splash.setMessage("Ready!")
+    QApplication.processEvents()
+
+    # Close splash and show main window
+    splash.close()
     window.showMaximized()
+
     sys.exit(app.exec())
 
 if __name__ == "__main__":

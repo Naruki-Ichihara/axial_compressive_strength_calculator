@@ -27,6 +27,18 @@ REM Check for required dependencies
 echo Checking dependencies...
 pip install -e ".[build]" --quiet
 
+REM Get version from acsc/__init__.py and update installer.iss
+echo.
+echo Updating version in installer.iss...
+for /f "tokens=2 delims='=""'" %%v in ('python -c "from acsc import __version__; print(__version__)"') do set VERSION=%%v
+python -c "from acsc import __version__; print(__version__)" > temp_version.txt
+set /p VERSION=<temp_version.txt
+del temp_version.txt
+echo Version: %VERSION%
+
+REM Update installer.iss with current version
+python -c "import re; f=open('installer.iss','r'); c=f.read(); f.close(); c=re.sub(r'#define MyAppVersion \"[^\"]+\"', '#define MyAppVersion \"%VERSION%\"'.replace('%%VERSION%%','%VERSION%'), c); f=open('installer.iss','w'); f.write(c); f.close()"
+
 echo.
 echo Step 0: Creating icon file...
 echo ------------------------------------------------
@@ -95,7 +107,7 @@ echo  Build Complete!
 echo ============================================
 echo.
 echo Portable version: dist\ACSC\
-echo Installer:        installer_output\ACSC_Setup_0.0.5.exe
+echo Installer:        installer_output\ACSC_Setup_%VERSION%.exe
 echo.
 
 endlocal

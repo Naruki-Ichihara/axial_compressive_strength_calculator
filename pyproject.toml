@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "acsc"
-version = "0.0.6"
+dynamic = ["version"]
 description = "Axial compressive strength calculator"
 readme = "README.md"
 license = {text = "MIT"}
@@ -64,6 +64,9 @@ acsc-gui = "acsc.gui:main"
 
 [tool.setuptools]
 zip-safe = false
+
+[tool.setuptools.dynamic]
+version = {attr = "acsc.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]

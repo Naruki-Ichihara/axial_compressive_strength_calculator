@@ -64,7 +64,9 @@ class FiberTrajectory:
         fiber_volume_fraction: float,
         scale: float = 1.0,
         seed: int = 42,
-        reference_vector: list = None
+        reference_vector: list = None,
+        vf_map: np.ndarray = None,
+        vf_roi_bounds: tuple = None
     ) -> np.ndarray:
         """
         Initialize fiber positions using Poisson disk sampling.
@@ -78,6 +80,9 @@ class FiberTrajectory:
             reference_vector: Reference direction [x, y, z] for fiber axis.
                              Determines the propagation axis and sampling plane.
                              Default is [0, 0, 1] (Z-axis, sample in XY plane).
+            vf_map: Optional 3D volume fraction map for weighted sampling.
+                   Higher Vf regions will have more fibers.
+            vf_roi_bounds: Bounds of Vf map (z_min, z_max, y_min, y_max, x_min, x_max).
 
         Returns:
             Initial fiber center positions as (N, 2) array.
@@ -85,6 +90,10 @@ class FiberTrajectory:
         self.bounds = shape
         self.fiber_diameter = fiber_diameter
         self.fiber_volume_fraction = fiber_volume_fraction
+
+        # Store Vf map for resampling
+        self.vf_map = vf_map
+        self.vf_roi_bounds = vf_roi_bounds
 
         # Determine propagation axis from reference vector
         if reference_vector is None:
@@ -131,38 +140,45 @@ class FiberTrajectory:
         dim0 = cross_section_dims[0]  # First dimension (y for Z-axis, z for X/Y-axis)
         dim1 = cross_section_dims[1]  # Second dimension (x for Z-axis)
 
-        # The minimum distance between fiber centers is fiber_diameter * scale
-        min_distance = fiber_diameter * scale
+        # Check if Vf-based variable spacing should be used
+        if vf_map is not None and vf_roi_bounds is not None:
+            # Use variable-spacing Poisson sampling based on local Vf
+            points = self._generate_vf_based_fibers(
+                vf_map, vf_roi_bounds, cross_section_dims,
+                fiber_diameter, scale, seed
+            )
+            self._log(f"Generated {len(points)} fibers with Vf-based spacing")
+        else:
+            # Original fixed-distance Poisson disk sampling
+            # The minimum distance between fiber centers is fiber_diameter * scale
+            min_distance = fiber_diameter * scale
 
-        # Normalize radius relative to the maximum dimension for PoissonDisk
-        max_dim = max(dim0, dim1)
-        normalized_radius = min_distance / max_dim
+            # Normalize radius relative to the maximum dimension for PoissonDisk
+            max_dim = max(dim0, dim1)
+            normalized_radius = min_distance / max_dim
 
-        # PoissonDisk samples in [0, 1]^d, then we scale to actual dimensions
-        # Request more samples than needed because some will be filtered out
-        n_samples_requested = max(num_fibers * 4, 100000)  # Request at least 4x or 100000
+            # PoissonDisk samples in [0, 1]^d, then we scale to actual dimensions
+            # Request more samples than needed because some will be filtered out
+            n_samples_requested = max(num_fibers * 4, 100000)  # Request at least 4x or 100000
 
-        sampler = PoissonDisk(d=2, radius=normalized_radius, seed=seed)
-        normalized_points = sampler.random(n_samples_requested)
+            sampler = PoissonDisk(d=2, radius=normalized_radius, seed=seed)
+            normalized_points = sampler.random(n_samples_requested)
 
-        # Scale to actual cross-section dimensions
-        # normalized_points[:, 0] -> scale to dim1 (x direction for Z-axis)
-        # normalized_points[:, 1] -> scale to dim0 (y direction for Z-axis)
-        all_points = np.zeros_like(normalized_points)
-        all_points[:, 0] = normalized_points[:, 0] * max_dim  # x coordinate
-        all_points[:, 1] = normalized_points[:, 1] * max_dim  # y coordinate
+            # Scale to actual cross-section dimensions
+            all_points = np.zeros_like(normalized_points)
+            all_points[:, 0] = normalized_points[:, 0] * max_dim  # x coordinate
+            all_points[:, 1] = normalized_points[:, 1] * max_dim  # y coordinate
 
-        # Filter points to be within actual cross-section bounds
-        # points[:, 0] is x (should be < dim1), points[:, 1] is y (should be < dim0)
-        valid_mask = (all_points[:, 0] >= 0) & (all_points[:, 0] < dim1) & \
-                     (all_points[:, 1] >= 0) & (all_points[:, 1] < dim0)
-        points = all_points[valid_mask]
+            # Filter points to be within actual cross-section bounds
+            valid_mask = (all_points[:, 0] >= 0) & (all_points[:, 0] < dim1) & \
+                         (all_points[:, 1] >= 0) & (all_points[:, 1] < dim0)
+            points = all_points[valid_mask]
 
-        self._log(f"Generated {len(points)} valid fiber positions")
+            self._log(f"Generated {len(points)} valid fiber positions")
 
-        # Limit to target number of fibers
-        if len(points) > num_fibers:
-            points = points[:num_fibers]
+            if len(points) > num_fibers:
+                # Limit to target number of fibers (uniform sampling)
+                points = points[:num_fibers]
 
         self._log(f"Final number of fibers: {len(points)}")
 
@@ -455,7 +471,8 @@ class FiberTrajectory:
             if resample_interval > 0 and s % resample_interval == 0:
                 new_fiber_points, new_fiber_count = self._resample_empty_regions(
                     new_points, active, dim0_max + 1, dim1_max + 1,
-                    seed=resample_seed if resample_seed else s
+                    seed=resample_seed if resample_seed else s,
+                    current_slice=s
                 )
                 if new_fiber_count > 0:
                     # Add new fibers
@@ -669,7 +686,8 @@ class FiberTrajectory:
             if resample_interval > 0 and s % resample_interval == 0:
                 new_fiber_points, new_fiber_count = self._resample_empty_regions(
                     new_points, active, dim0_max + 1, dim1_max + 1,
-                    seed=resample_seed if resample_seed else s
+                    seed=resample_seed if resample_seed else s,
+                    current_slice=s
                 )
                 if new_fiber_count > 0:
                     new_points = np.vstack([new_points, new_fiber_points])
@@ -1032,10 +1050,14 @@ class FiberTrajectory:
         active: np.ndarray,
         x_size: float,
         y_size: float,
-        seed: int = 42
+        seed: int = 42,
+        current_slice: int = 0
     ) -> tuple:
         """
         Find empty regions and resample new fibers there.
+
+        If vf_map is available, uses Vf-based spacing to determine empty regions
+        and place new fibers. Higher Vf regions require smaller spacing.
 
         Args:
             current_points: Current fiber positions (N, 2).
@@ -1043,6 +1065,7 @@ class FiberTrajectory:
             x_size: Domain size in x direction.
             y_size: Domain size in y direction.
             seed: Random seed for sampling.
+            current_slice: Current slice index for Vf lookup.
 
         Returns:
             Tuple of (new_points, count) where new_points is array of new fiber
@@ -1050,21 +1073,25 @@ class FiberTrajectory:
         """
         # Get only active fiber positions
         active_points = current_points[active]
+        rng = np.random.default_rng(seed)
 
         if len(active_points) == 0:
             # All fibers stopped - resample entire domain
-            rng = np.random.default_rng(seed)
-            # Estimate number of fibers based on original volume fraction
             target_fibers = int(x_size * y_size * self.fiber_volume_fraction / (np.pi / 4 * self.fiber_diameter ** 2))
             new_points = rng.random((target_fibers, 2)) * np.array([x_size, y_size])
-            # Filter to maintain minimum distance
             new_points = self._filter_by_distance(new_points, self.fiber_diameter)
             return new_points, len(new_points)
 
         # Build KD-tree of active fibers
         tree = KDTree(active_points)
 
-        # Generate candidate points on a grid
+        # Check if Vf-based spacing should be used
+        if self.vf_map is not None and self.vf_roi_bounds is not None:
+            return self._resample_with_vf_spacing(
+                active_points, tree, x_size, y_size, current_slice, rng
+            )
+
+        # Original fixed-spacing resampling
         grid_spacing = self.fiber_diameter * 1.5
         x_grid = np.arange(self.fiber_diameter, x_size - self.fiber_diameter, grid_spacing)
         y_grid = np.arange(self.fiber_diameter, y_size - self.fiber_diameter, grid_spacing)
@@ -1072,9 +1099,111 @@ class FiberTrajectory:
         candidates = []
         for x in x_grid:
             for y in y_grid:
-                # Check if there's no fiber nearby
                 dist, _ = tree.query([x, y])
-                if dist > self.fiber_diameter * 1.2:  # Empty region
+                if dist > self.fiber_diameter * 1.2:
+                    candidates.append([x, y])
+
+        if not candidates:
+            return np.array([]).reshape(0, 2), 0
+
+        candidates = np.array(candidates)
+        max_new = min(len(candidates), max(1, len(candidates) // 4))
+        indices = rng.choice(len(candidates), size=max_new, replace=False)
+        new_points = candidates[indices]
+        new_points = self._filter_by_distance(new_points, self.fiber_diameter)
+
+        return new_points, len(new_points)
+
+    def _resample_with_vf_spacing(
+        self,
+        active_points: np.ndarray,
+        tree: KDTree,
+        x_size: float,
+        y_size: float,
+        current_slice: int,
+        rng: np.random.Generator
+    ) -> tuple:
+        """
+        Resample fibers using Vf-based spacing.
+
+        Args:
+            active_points: Currently active fiber positions.
+            tree: KDTree of active fibers.
+            x_size: Domain size in x.
+            y_size: Domain size in y.
+            current_slice: Current slice index.
+            rng: Random generator.
+
+        Returns:
+            Tuple of (new_points, count).
+        """
+        z_min, z_max, y_min, y_max, x_min, x_max = self.vf_roi_bounds
+
+        # Get Vf slice for current position
+        if self.propagation_axis == 2:  # Z-axis
+            slice_idx = current_slice - z_min
+            if 0 <= slice_idx < self.vf_map.shape[0]:
+                vf_slice = self.vf_map[slice_idx]  # (y_roi, x_roi)
+            else:
+                vf_slice = np.mean(self.vf_map, axis=0)
+        elif self.propagation_axis == 0:  # X-axis
+            slice_idx = current_slice - x_min
+            if 0 <= slice_idx < self.vf_map.shape[2]:
+                vf_slice = self.vf_map[:, :, slice_idx]  # (z_roi, y_roi)
+            else:
+                vf_slice = np.mean(self.vf_map, axis=2)
+        else:  # Y-axis
+            slice_idx = current_slice - y_min
+            if 0 <= slice_idx < self.vf_map.shape[1]:
+                vf_slice = self.vf_map[:, slice_idx, :]  # (z_roi, x_roi)
+            else:
+                vf_slice = np.mean(self.vf_map, axis=1)
+
+        # Calculate spacing from Vf using square packing formula
+        # s = d * sqrt(π/4) / sqrt(Vf) ≈ d * 0.8862 / sqrt(Vf)
+        vf_safe = np.clip(vf_slice, 0.01, 1.0)
+        min_spacing = self.fiber_diameter
+        max_spacing = self.fiber_diameter * 10
+        spacing_coeff = np.sqrt(np.pi / 4)  # ≈ 0.8862
+        spacing_map = self.fiber_diameter * spacing_coeff / np.sqrt(vf_safe)
+        spacing_map = np.clip(spacing_map, min_spacing, max_spacing)
+
+        def get_local_spacing(x, y):
+            """Get local required spacing at a point (local coordinates)."""
+            # Points are in local ROI coordinates, Vf map is also local
+            if self.propagation_axis == 2:  # Z-axis (XY plane)
+                vf_x = int(x)
+                vf_y = int(y)
+                if 0 <= vf_y < spacing_map.shape[0] and 0 <= vf_x < spacing_map.shape[1]:
+                    return spacing_map[vf_y, vf_x]
+            elif self.propagation_axis == 0:  # X-axis (YZ plane)
+                vf_z = int(y)
+                vf_y = int(x)
+                if 0 <= vf_z < spacing_map.shape[0] and 0 <= vf_y < spacing_map.shape[1]:
+                    return spacing_map[vf_z, vf_y]
+            else:  # Y-axis (XZ plane)
+                vf_z = int(y)
+                vf_x = int(x)
+                if 0 <= vf_z < spacing_map.shape[0] and 0 <= vf_x < spacing_map.shape[1]:
+                    return spacing_map[vf_z, vf_x]
+            return max_spacing
+
+        # Generate candidates in high-Vf regions and check if they should exist
+        grid_spacing = self.fiber_diameter
+        x_grid = np.arange(self.fiber_diameter, x_size - self.fiber_diameter, grid_spacing)
+        y_grid = np.arange(self.fiber_diameter, y_size - self.fiber_diameter, grid_spacing)
+
+        candidates = []
+        for x in x_grid:
+            for y in y_grid:
+                # Get local required spacing
+                local_spacing = get_local_spacing(x, y)
+
+                # Check distance to nearest existing fiber
+                dist, _ = tree.query([x, y])
+
+                # If there's no fiber within the required spacing, this is an empty region
+                if dist > local_spacing:
                     candidates.append([x, y])
 
         if not candidates:
@@ -1082,16 +1211,89 @@ class FiberTrajectory:
 
         candidates = np.array(candidates)
 
-        # Randomly select subset of candidates
-        rng = np.random.default_rng(seed)
-        max_new = min(len(candidates), max(1, len(candidates) // 4))
-        indices = rng.choice(len(candidates), size=max_new, replace=False)
-        new_points = candidates[indices]
+        # Sort candidates by Vf (higher Vf first)
+        candidate_vf = self._get_vf_weights_for_points(candidates, current_slice)
+        sorted_indices = np.argsort(candidate_vf)[::-1]
 
-        # Filter to maintain minimum distance among new points
-        new_points = self._filter_by_distance(new_points, self.fiber_diameter)
+        # Select points maintaining local spacing constraints
+        new_points = []
+        for idx in sorted_indices:
+            x, y = candidates[idx]
+            local_spacing = get_local_spacing(x, y)
 
-        return new_points, len(new_points)
+            # Check distance to existing active fibers
+            dist_to_active, _ = tree.query([x, y])
+            if dist_to_active < local_spacing:
+                continue
+
+            # Check distance to already selected new points
+            can_place = True
+            for px, py in new_points:
+                dist = np.sqrt((x - px)**2 + (y - py)**2)
+                other_spacing = get_local_spacing(px, py)
+                if dist < min(local_spacing, other_spacing):
+                    can_place = False
+                    break
+
+            if can_place:
+                new_points.append([x, y])
+
+        if not new_points:
+            return np.array([]).reshape(0, 2), 0
+
+        return np.array(new_points), len(new_points)
+
+    def _get_vf_weights_for_points(
+        self,
+        points: np.ndarray,
+        current_slice: int
+    ) -> np.ndarray:
+        """
+        Get Vf-based weights for candidate points at a specific slice.
+
+        Args:
+            points: Candidate positions (N, 2) array.
+            current_slice: Current slice index along propagation axis.
+
+        Returns:
+            Weight array based on local Vf values.
+        """
+        if self.vf_map is None or self.vf_roi_bounds is None:
+            return np.ones(len(points))
+
+        weights = np.ones(len(points)) * 0.1  # Default low weight
+
+        # Get the Vf slice for current position
+        # Points are in local ROI coordinates, Vf map is also local
+        if self.propagation_axis == 2:  # Z-axis propagation
+            slice_idx = current_slice  # Local slice index
+            if 0 <= slice_idx < self.vf_map.shape[0]:
+                vf_slice = self.vf_map[slice_idx]  # Shape: (y_roi, x_roi)
+                for i, pt in enumerate(points):
+                    vf_x = int(pt[0])
+                    vf_y = int(pt[1])
+                    if 0 <= vf_y < vf_slice.shape[0] and 0 <= vf_x < vf_slice.shape[1]:
+                        weights[i] = max(vf_slice[vf_y, vf_x], 0.01)
+        elif self.propagation_axis == 0:  # X-axis propagation
+            slice_idx = current_slice
+            if 0 <= slice_idx < self.vf_map.shape[2]:
+                vf_slice = self.vf_map[:, :, slice_idx]  # Shape: (z_roi, y_roi)
+                for i, pt in enumerate(points):
+                    vf_y = int(pt[0])
+                    vf_z = int(pt[1])
+                    if 0 <= vf_z < vf_slice.shape[0] and 0 <= vf_y < vf_slice.shape[1]:
+                        weights[i] = max(vf_slice[vf_z, vf_y], 0.01)
+        else:  # Y-axis propagation
+            slice_idx = current_slice
+            if 0 <= slice_idx < self.vf_map.shape[1]:
+                vf_slice = self.vf_map[:, slice_idx, :]  # Shape: (z_roi, x_roi)
+                for i, pt in enumerate(points):
+                    vf_x = int(pt[0])
+                    vf_z = int(pt[1])
+                    if 0 <= vf_z < vf_slice.shape[0] and 0 <= vf_x < vf_slice.shape[1]:
+                        weights[i] = max(vf_slice[vf_z, vf_x], 0.01)
+
+        return weights
 
     def _filter_by_distance(self, points: np.ndarray, min_distance: float) -> np.ndarray:
         """Filter points to maintain minimum distance between them."""
@@ -1106,6 +1308,272 @@ class FiberTrajectory:
                 filtered.append(pt)
 
         return np.array(filtered)
+
+    def _generate_vf_based_fibers(
+        self,
+        vf_map: np.ndarray,
+        vf_roi_bounds: tuple,
+        cross_section_dims: tuple,
+        fiber_diameter: float,
+        scale: float,
+        seed: int = 42
+    ) -> np.ndarray:
+        """
+        Generate fiber positions with spacing calculated from local Vf values.
+
+        The fiber spacing is derived from local Vf:
+        - For hexagonal packing: spacing = d * sqrt(π / (2√3 * Vf))
+        - Higher Vf -> smaller spacing -> more fibers
+
+        Args:
+            vf_map: 3D volume fraction map.
+            vf_roi_bounds: Bounds of Vf map (z_min, z_max, y_min, y_max, x_min, x_max).
+            cross_section_dims: Cross-section dimensions (dim0, dim1).
+            fiber_diameter: Fiber diameter in pixels.
+            scale: Additional scale factor for spacing.
+            seed: Random seed for reproducibility.
+
+        Returns:
+            Array of fiber positions (N, 2).
+        """
+        z_min, z_max, y_min, y_max, x_min, x_max = vf_roi_bounds
+        dim0, dim1 = cross_section_dims
+
+        # Compute mean Vf along propagation axis to get 2D weight map
+        if self.propagation_axis == 0:  # X-axis propagation, sample in YZ plane
+            vf_2d = np.mean(vf_map, axis=2)  # Shape: (z_roi, y_roi)
+        elif self.propagation_axis == 1:  # Y-axis propagation, sample in XZ plane
+            vf_2d = np.mean(vf_map, axis=1)  # Shape: (z_roi, x_roi)
+        else:  # Z-axis propagation, sample in XY plane
+            vf_2d = np.mean(vf_map, axis=0)  # Shape: (y_roi, x_roi)
+
+        self._log(f"Vf map 2D shape: {vf_2d.shape}, range: [{vf_2d.min():.3f}, {vf_2d.max():.3f}]")
+
+        # Calculate spacing map from Vf map
+        # For square packing: Vf = (π/4 * d²) / s²
+        # Therefore: s = d * sqrt(π/4 / Vf) = d * sqrt(π/4) / sqrt(Vf)
+        # sqrt(π/4) ≈ 0.8862
+        # Minimum spacing should be fiber_diameter (touching fibers)
+        min_spacing = fiber_diameter * scale
+        max_spacing = fiber_diameter * 10  # Max spacing for very low Vf regions
+
+        # Avoid division by zero
+        vf_safe = np.clip(vf_2d, 0.01, 1.0)
+
+        # Calculate spacing: higher Vf = smaller spacing
+        # s = d * sqrt(π/4) / sqrt(Vf) ≈ d * 0.8862 / sqrt(Vf)
+        spacing_coeff = np.sqrt(np.pi / 4)  # ≈ 0.8862
+        spacing_2d = fiber_diameter * spacing_coeff / np.sqrt(vf_safe)
+        spacing_2d = np.clip(spacing_2d, min_spacing, max_spacing) * scale
+
+        self._log(f"Spacing range: [{spacing_2d.min():.2f}, {spacing_2d.max():.2f}] pixels")
+
+        # Use grid-based sequential placement for better coverage
+        rng = np.random.default_rng(seed)
+        points = []
+
+        # Cell size based on minimum spacing for collision detection
+        cell_size = min_spacing / np.sqrt(2)
+        n_cells_x = int(np.ceil(dim1 / cell_size))
+        n_cells_y = int(np.ceil(dim0 / cell_size))
+
+        # Grid to track occupied cells
+        grid = [[[] for _ in range(n_cells_x)] for _ in range(n_cells_y)]
+
+        def get_cell(x, y):
+            cx = int(x / cell_size)
+            cy = int(y / cell_size)
+            return max(0, min(cy, n_cells_y - 1)), max(0, min(cx, n_cells_x - 1))
+
+        def get_local_spacing(x, y):
+            # Points are in local ROI coordinates (0-based)
+            # Vf map is also in local coordinates (same size as ROI)
+            # So we use coordinates directly without subtracting roi_bounds
+            if self.propagation_axis == 2:  # Z-axis (XY plane)
+                vf_x = int(x)
+                vf_y = int(y)
+                if 0 <= vf_y < vf_2d.shape[0] and 0 <= vf_x < vf_2d.shape[1]:
+                    return spacing_2d[vf_y, vf_x]
+            elif self.propagation_axis == 0:  # X-axis (YZ plane)
+                vf_z = int(y)
+                vf_y = int(x)
+                if 0 <= vf_z < vf_2d.shape[0] and 0 <= vf_y < vf_2d.shape[1]:
+                    return spacing_2d[vf_z, vf_y]
+            else:  # Y-axis (XZ plane)
+                vf_z = int(y)
+                vf_x = int(x)
+                if 0 <= vf_z < vf_2d.shape[0] and 0 <= vf_x < vf_2d.shape[1]:
+                    return spacing_2d[vf_z, vf_x]
+            return max_spacing
+
+        def can_place_point(x, y, spacing):
+            cy, cx = get_cell(x, y)
+            search_radius = int(np.ceil(max_spacing / cell_size)) + 1
+            for dy in range(-search_radius, search_radius + 1):
+                for dx in range(-search_radius, search_radius + 1):
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < n_cells_y and 0 <= nx < n_cells_x:
+                        for idx in grid[ny][nx]:
+                            px, py = points[idx]
+                            dist = np.sqrt((x - px)**2 + (y - py)**2)
+                            other_spacing = get_local_spacing(px, py)
+                            required_dist = min(spacing, other_spacing)
+                            if dist < required_dist:
+                                return False
+            return True
+
+        # Generate dense grid candidates with small step for optimal coverage
+        # Use 1/8 of minimum spacing for very dense candidate generation
+        grid_step = min_spacing / 8
+
+        # Create dense grid of candidates (no margin, match Poisson sampling behavior)
+        candidates = []
+
+        y = 0
+        while y < dim0:
+            x = 0
+            while x < dim1:
+                candidates.append((x, y))
+                x += grid_step
+            y += grid_step
+
+        candidates = np.array(candidates)
+        self._log(f"Generated {len(candidates)} grid candidates")
+
+        # Get Vf for each candidate and sort by Vf descending
+        candidate_vf = np.zeros(len(candidates))
+        for i, (x, y) in enumerate(candidates):
+            spacing = get_local_spacing(x, y)
+            # Higher Vf means smaller spacing
+            candidate_vf[i] = (fiber_diameter * np.sqrt(np.pi / 4) / spacing) ** 2
+
+        # Sort by Vf descending (place in high Vf regions first)
+        sorted_indices = np.argsort(candidate_vf)[::-1]
+
+        # Place fibers in order of decreasing Vf
+        for idx in sorted_indices:
+            x, y = candidates[idx]
+            spacing = get_local_spacing(x, y)
+
+            if can_place_point(x, y, spacing):
+                point_idx = len(points)
+                points.append((x, y))
+                cy, cx = get_cell(x, y)
+                grid[cy][cx].append(point_idx)
+
+        # Second pass: try to fill gaps with random candidates
+        n_random = max(50000, dim0 * dim1 * 5)
+        random_x = rng.uniform(fiber_diameter / 2, dim1 - fiber_diameter / 2, n_random)
+        random_y = rng.uniform(fiber_diameter / 2, dim0 - fiber_diameter / 2, n_random)
+
+        # Sort random candidates by Vf descending too
+        random_vf = np.zeros(n_random)
+        for i in range(n_random):
+            spacing = get_local_spacing(random_x[i], random_y[i])
+            random_vf[i] = (fiber_diameter * np.sqrt(np.pi / 4) / spacing) ** 2
+        random_sorted = np.argsort(random_vf)[::-1]
+
+        for idx in random_sorted:
+            x, y = random_x[idx], random_y[idx]
+            spacing = get_local_spacing(x, y)
+
+            if can_place_point(x, y, spacing):
+                point_idx = len(points)
+                points.append((x, y))
+                cy, cx = get_cell(x, y)
+                grid[cy][cx].append(point_idx)
+
+        if len(points) == 0:
+            self._log("Warning: No fibers generated with Vf-based spacing")
+            return np.array([]).reshape(0, 2)
+
+        result = np.array(points)
+        self._log(f"Generated {len(result)} fibers with Vf-based variable spacing")
+
+        return result
+
+    def _apply_vf_weighted_selection(
+        self,
+        points: np.ndarray,
+        vf_map: np.ndarray,
+        vf_roi_bounds: tuple,
+        num_fibers: int,
+        cross_section_dims: tuple,
+        seed: int = 42
+    ) -> np.ndarray:
+        """
+        Select fiber positions weighted by local Vf values.
+
+        Higher Vf regions keep more fibers. Each fiber is kept with probability
+        proportional to the local Vf value, then limited to num_fibers.
+
+        Args:
+            points: Candidate fiber positions (N, 2) array.
+            vf_map: 3D volume fraction map.
+            vf_roi_bounds: Bounds of Vf map (z_min, z_max, y_min, y_max, x_min, x_max).
+            num_fibers: Target number of fibers to select.
+            cross_section_dims: Cross-section dimensions (dim0, dim1).
+            seed: Random seed for reproducibility.
+
+        Returns:
+            Selected fiber positions based on Vf weights.
+        """
+        z_min, z_max, y_min, y_max, x_min, x_max = vf_roi_bounds
+        dim0, dim1 = cross_section_dims
+
+        # Compute mean Vf along propagation axis to get 2D weight map
+        # vf_map shape: (z_roi, y_roi, x_roi)
+        if self.propagation_axis == 0:  # X-axis propagation, sample in YZ plane
+            vf_2d = np.mean(vf_map, axis=2)  # Shape: (z_roi, y_roi)
+        elif self.propagation_axis == 1:  # Y-axis propagation, sample in XZ plane
+            vf_2d = np.mean(vf_map, axis=1)  # Shape: (z_roi, x_roi)
+        else:  # Z-axis propagation, sample in XY plane
+            vf_2d = np.mean(vf_map, axis=0)  # Shape: (y_roi, x_roi)
+
+        # Compute local Vf for each point
+        local_vf = np.zeros(len(points))
+        for i, pt in enumerate(points):
+            x, y = pt[0], pt[1]
+
+            # Map point coordinates to vf_2d indices
+            if self.propagation_axis == 2:  # Z-axis propagation (XY plane)
+                vf_x = int(x) - x_min
+                vf_y = int(y) - y_min
+                if 0 <= vf_y < vf_2d.shape[0] and 0 <= vf_x < vf_2d.shape[1]:
+                    local_vf[i] = vf_2d[vf_y, vf_x]
+            elif self.propagation_axis == 0:  # X-axis propagation (YZ plane)
+                vf_z = int(y) - z_min
+                vf_y = int(x) - y_min
+                if 0 <= vf_z < vf_2d.shape[0] and 0 <= vf_y < vf_2d.shape[1]:
+                    local_vf[i] = vf_2d[vf_z, vf_y]
+            else:  # Y-axis propagation (XZ plane)
+                vf_z = int(y) - z_min
+                vf_x = int(x) - x_min
+                if 0 <= vf_z < vf_2d.shape[0] and 0 <= vf_x < vf_2d.shape[1]:
+                    local_vf[i] = vf_2d[vf_z, vf_x]
+
+        # Simple approach: sort by Vf and take top num_fibers
+        # This ensures high-Vf regions have more fibers
+        rng = np.random.default_rng(seed)
+
+        # Add small random noise to Vf to break ties and add randomness
+        noise = rng.random(len(points)) * 0.001
+        local_vf_noisy = local_vf + noise
+
+        # Sort by Vf descending
+        sorted_indices = np.argsort(local_vf_noisy)[::-1]
+
+        # Take top num_fibers points (prioritizing high Vf)
+        n_select = min(num_fibers, len(points))
+        selected_indices = sorted_indices[:n_select]
+        filtered_points = points[selected_indices]
+
+        # Log distribution
+        selected_vf = local_vf[selected_indices]
+        self._log(f"Vf-weighted selection: {len(points)} -> {len(filtered_points)} fibers")
+        self._log(f"  Mean Vf of selected: {np.mean(selected_vf):.3f}, excluded: {np.mean(local_vf[sorted_indices[n_select:]]):.3f}" if len(sorted_indices) > n_select else f"  Mean Vf: {np.mean(selected_vf):.3f}")
+
+        return filtered_points
 
     def _relax_points(
         self,

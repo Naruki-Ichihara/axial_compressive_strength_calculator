@@ -1,0 +1,313 @@
+"""
+Segmentation utilities for fiber volume fraction estimation.
+
+This module provides methods to estimate local fiber volume fraction (Vf)
+from segmented CT images where fibers and matrix regions are identified.
+"""
+
+import numpy as np
+from scipy import ndimage
+from typing import Optional, Tuple, Union
+
+
+def estimate_local_vf(
+    segmentation: np.ndarray,
+    fiber_label: int = 1,
+    window_size: Union[int, Tuple[int, ...]] = 50,
+    gaussian_sigma: Optional[float] = None,
+    normalize: bool = True
+) -> np.ndarray:
+    """
+    Estimate local fiber volume fraction from segmented image.
+
+    This function calculates the local fiber volume fraction (Vf) by computing
+    the fraction of fiber pixels within a sliding window or using Gaussian
+    weighted averaging.
+
+    Args:
+        segmentation: Segmented image/volume where fiber regions are labeled.
+                     Can be 2D (single slice) or 3D (volume).
+        fiber_label: Label value representing fiber regions in the segmentation.
+                    Default is 1 (assuming binary: 0=matrix, 1=fiber).
+        window_size: Size of the window for local Vf calculation.
+                    - If int: same size for all dimensions
+                    - If tuple: specific size for each dimension
+                    For box averaging without Gaussian smoothing.
+        gaussian_sigma: If provided, use Gaussian-weighted averaging instead of
+                       box averaging. The sigma value controls the smoothing scale.
+                       Larger values result in smoother Vf distributions.
+        normalize: If True, normalize output to [0, 1] range. Default is True.
+
+    Returns:
+        np.ndarray: Local fiber volume fraction map with same shape as input.
+                   Values range from 0 (pure matrix) to 1 (pure fiber).
+
+    Example:
+        >>> # Binary segmentation: 0=matrix, 1=fiber
+        >>> seg = np.array([[0, 0, 1, 1],
+        ...                 [0, 1, 1, 1],
+        ...                 [1, 1, 1, 0],
+        ...                 [1, 1, 0, 0]])
+        >>> vf = estimate_local_vf(seg, window_size=3)
+        >>> print(vf.shape)
+        (4, 4)
+    """
+    # Create binary fiber mask
+    fiber_mask = (segmentation == fiber_label).astype(np.float64)
+
+    if gaussian_sigma is not None:
+        # Gaussian-weighted averaging
+        vf_map = ndimage.gaussian_filter(fiber_mask, sigma=gaussian_sigma)
+    else:
+        # Box averaging using uniform filter
+        if isinstance(window_size, int):
+            size = window_size
+        else:
+            size = window_size
+
+        vf_map = ndimage.uniform_filter(fiber_mask, size=size, mode='nearest')
+
+    if normalize:
+        # Ensure values are in [0, 1] range
+        vf_map = np.clip(vf_map, 0.0, 1.0)
+
+    return vf_map
+
+
+def estimate_vf_distribution(
+    segmentation: np.ndarray,
+    fiber_label: int = 1,
+    window_size: Union[int, Tuple[int, ...]] = 50,
+    gaussian_sigma: Optional[float] = None,
+    mask: Optional[np.ndarray] = None,
+    bins: int = 50
+) -> Tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Estimate the distribution of local fiber volume fraction.
+
+    Args:
+        segmentation: Segmented image/volume where fiber regions are labeled.
+        fiber_label: Label value representing fiber regions.
+        window_size: Size of the window for local Vf calculation.
+        gaussian_sigma: If provided, use Gaussian-weighted averaging.
+        mask: Optional binary mask to restrict analysis to specific region.
+        bins: Number of bins for histogram.
+
+    Returns:
+        Tuple containing:
+        - hist: Histogram counts
+        - bin_edges: Bin edges for the histogram
+        - stats: Dictionary with statistical measures:
+            - 'mean': Mean Vf
+            - 'std': Standard deviation
+            - 'median': Median Vf
+            - 'min': Minimum Vf
+            - 'max': Maximum Vf
+            - 'global_vf': Global fiber volume fraction
+    """
+    # Calculate local Vf map
+    vf_map = estimate_local_vf(
+        segmentation,
+        fiber_label=fiber_label,
+        window_size=window_size,
+        gaussian_sigma=gaussian_sigma
+    )
+
+    # Apply mask if provided
+    if mask is not None:
+        vf_values = vf_map[mask > 0]
+        fiber_mask = (segmentation == fiber_label)
+        global_vf = np.sum(fiber_mask[mask > 0]) / np.sum(mask > 0)
+    else:
+        vf_values = vf_map.ravel()
+        fiber_mask = (segmentation == fiber_label)
+        global_vf = np.mean(fiber_mask)
+
+    # Compute histogram
+    hist, bin_edges = np.histogram(vf_values, bins=bins, range=(0, 1))
+
+    # Compute statistics
+    stats = {
+        'mean': np.mean(vf_values),
+        'std': np.std(vf_values),
+        'median': np.median(vf_values),
+        'min': np.min(vf_values),
+        'max': np.max(vf_values),
+        'global_vf': global_vf
+    }
+
+    return hist, bin_edges, stats
+
+
+def estimate_vf_slice_by_slice(
+    segmentation: np.ndarray,
+    fiber_label: int = 1,
+    window_size: Union[int, Tuple[int, int]] = 50,
+    gaussian_sigma: Optional[float] = None,
+    axis: int = 0
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Estimate fiber volume fraction for each slice along an axis.
+
+    This is useful for analyzing Vf variation through the thickness of a sample.
+
+    Args:
+        segmentation: 3D segmented volume.
+        fiber_label: Label value representing fiber regions.
+        window_size: Size of the window for local Vf calculation (2D).
+        gaussian_sigma: If provided, use Gaussian-weighted averaging.
+        axis: Axis along which to compute slice-by-slice Vf (default: 0 = z-axis).
+
+    Returns:
+        Tuple containing:
+        - slice_indices: Array of slice indices
+        - vf_per_slice: Mean Vf for each slice
+    """
+    if segmentation.ndim != 3:
+        raise ValueError("Input must be a 3D volume")
+
+    n_slices = segmentation.shape[axis]
+    slice_indices = np.arange(n_slices)
+    vf_per_slice = np.zeros(n_slices)
+
+    for i in range(n_slices):
+        # Extract slice
+        if axis == 0:
+            slice_seg = segmentation[i, :, :]
+        elif axis == 1:
+            slice_seg = segmentation[:, i, :]
+        else:
+            slice_seg = segmentation[:, :, i]
+
+        # Calculate local Vf for this slice
+        vf_map = estimate_local_vf(
+            slice_seg,
+            fiber_label=fiber_label,
+            window_size=window_size,
+            gaussian_sigma=gaussian_sigma
+        )
+
+        vf_per_slice[i] = np.mean(vf_map)
+
+    return slice_indices, vf_per_slice
+
+
+def compute_vf_map_3d(
+    segmentation: np.ndarray,
+    fiber_label: int = 1,
+    window_size: Union[int, Tuple[int, int, int]] = 50,
+    gaussian_sigma: Optional[Union[float, Tuple[float, float, float]]] = None
+) -> np.ndarray:
+    """
+    Compute 3D local fiber volume fraction map.
+
+    This function computes a full 3D Vf distribution map, which can be
+    visualized as slices or rendered in 3D.
+
+    Args:
+        segmentation: 3D segmented volume.
+        fiber_label: Label value representing fiber regions.
+        window_size: Size of the window for local Vf calculation.
+                    Can be int (isotropic) or tuple (anisotropic).
+        gaussian_sigma: If provided, use Gaussian-weighted averaging.
+                       Can be float (isotropic) or tuple (anisotropic).
+
+    Returns:
+        np.ndarray: 3D local fiber volume fraction map.
+    """
+    if segmentation.ndim != 3:
+        raise ValueError("Input must be a 3D volume")
+
+    return estimate_local_vf(
+        segmentation,
+        fiber_label=fiber_label,
+        window_size=window_size,
+        gaussian_sigma=gaussian_sigma
+    )
+
+
+def threshold_otsu(image: np.ndarray) -> Tuple[np.ndarray, float]:
+    """
+    Apply Otsu's thresholding to segment fiber and matrix.
+
+    Args:
+        image: Grayscale image or volume.
+
+    Returns:
+        Tuple containing:
+        - binary: Binary segmentation (1=fiber, 0=matrix)
+        - threshold: Computed Otsu threshold value
+    """
+    from skimage.filters import threshold_otsu as skimage_otsu
+
+    threshold = skimage_otsu(image)
+    binary = (image > threshold).astype(np.uint8)
+
+    return binary, threshold
+
+
+def threshold_percentile(
+    image: np.ndarray,
+    percentile: float = 50.0,
+    invert: bool = False
+) -> Tuple[np.ndarray, float]:
+    """
+    Apply percentile-based thresholding to segment fiber and matrix.
+
+    Args:
+        image: Grayscale image or volume.
+        percentile: Percentile value for threshold (0-100).
+        invert: If True, values below threshold are labeled as fiber.
+
+    Returns:
+        Tuple containing:
+        - binary: Binary segmentation (1=fiber, 0=matrix)
+        - threshold: Computed threshold value
+    """
+    threshold = np.percentile(image, percentile)
+
+    if invert:
+        binary = (image < threshold).astype(np.uint8)
+    else:
+        binary = (image > threshold).astype(np.uint8)
+
+    return binary, threshold
+
+
+def apply_morphological_cleaning(
+    segmentation: np.ndarray,
+    opening_size: int = 2,
+    closing_size: int = 2
+) -> np.ndarray:
+    """
+    Apply morphological operations to clean up segmentation.
+
+    Args:
+        segmentation: Binary segmentation image/volume.
+        opening_size: Size of structuring element for opening (removes small objects).
+        closing_size: Size of structuring element for closing (fills small holes).
+
+    Returns:
+        np.ndarray: Cleaned binary segmentation.
+    """
+    from scipy.ndimage import binary_opening, binary_closing
+
+    # Create structuring element based on dimensionality
+    if segmentation.ndim == 2:
+        struct_open = np.ones((opening_size, opening_size))
+        struct_close = np.ones((closing_size, closing_size))
+    else:
+        struct_open = np.ones((opening_size, opening_size, opening_size))
+        struct_close = np.ones((closing_size, closing_size, closing_size))
+
+    # Apply opening to remove small noise
+    if opening_size > 0:
+        cleaned = binary_opening(segmentation, structure=struct_open)
+    else:
+        cleaned = segmentation.copy()
+
+    # Apply closing to fill small holes
+    if closing_size > 0:
+        cleaned = binary_closing(cleaned, structure=struct_close)
+
+    return cleaned.astype(np.uint8)
