@@ -1,4 +1,4 @@
-"""Splash screen for ACSC application."""
+"""Splash screen for VMM-FRC application."""
 
 import sys
 import os
@@ -14,7 +14,7 @@ class SplashScreen(QWidget):
 
     def __init__(self):
         super().__init__()
-        from acsc import __version__
+        from vmm import __version__
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
 
@@ -59,7 +59,7 @@ class SplashScreen(QWidget):
             scaled_pixmap = pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             logo_label.setPixmap(scaled_pixmap)
         else:
-            logo_label.setText("ACSC")
+            logo_label.setText("VMM")
             logo_label.setStyleSheet("font-size: 36px; font-weight: bold; color: #00a8ff;")
         logo_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(logo_label)
@@ -70,7 +70,7 @@ class SplashScreen(QWidget):
         title_layout.setSpacing(5)
         title_layout.setContentsMargins(0, 0, 0, 0)
 
-        title_label = QLabel("ACSC")
+        title_label = QLabel("VMM-FRC")
         title_label.setStyleSheet("""
             font-size: 32px;
             font-weight: 700;
@@ -79,7 +79,7 @@ class SplashScreen(QWidget):
         """)
         title_layout.addWidget(title_label)
 
-        subtitle_label = QLabel("Axial Compressive Strength Calculator")
+        subtitle_label = QLabel("Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites")
         subtitle_label.setStyleSheet("""
             font-size: 12px;
             font-weight: 400;
@@ -163,21 +163,21 @@ class SplashScreen(QWidget):
         layout.addWidget(container)
 
         # Set size and center
-        self.setFixedSize(480, 280)
+        self.setFixedSize(680, 280)
         self._center_on_screen()
 
     def _get_logo_path(self):
         """Get path to logo file."""
         possible_paths = [
-            os.path.join(os.path.dirname(__file__), '..', 'assets', 'acsc_logo.png'),
-            os.path.join(os.path.dirname(__file__), 'assets', 'acsc_logo.png'),
-            os.path.join(sys.prefix, 'assets', 'acsc_logo.png'),
+            os.path.join(os.path.dirname(__file__), '..', 'assets', 'vmm_logo.png'),
+            os.path.join(os.path.dirname(__file__), 'assets', 'vmm_logo.png'),
+            os.path.join(sys.prefix, 'assets', 'vmm_logo.png'),
         ]
 
         if getattr(sys, 'frozen', False):
             app_path = os.path.dirname(sys.executable)
-            possible_paths.insert(0, os.path.join(app_path, '_internal', 'assets', 'acsc_logo.png'))
-            possible_paths.insert(0, os.path.join(app_path, 'assets', 'acsc_logo.png'))
+            possible_paths.insert(0, os.path.join(app_path, '_internal', 'assets', 'vmm_logo.png'))
+            possible_paths.insert(0, os.path.join(app_path, 'assets', 'vmm_logo.png'))
 
         for path in possible_paths:
             if os.path.exists(path):

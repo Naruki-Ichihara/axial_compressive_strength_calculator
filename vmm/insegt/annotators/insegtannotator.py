@@ -22,7 +22,7 @@ GitHub:
    
 """
 
-import acsc.insegt.annotators.annotator as annotator
+import vmm.insegt.annotators.annotator as annotator
 import numpy as np
 import PyQt5.QtCore
 import PIL

@@ -1,11 +1,11 @@
 @echo off
-REM Build script for ACSC Windows Installer
-REM This script creates a standalone Windows installer for ACSC
+REM Build script for VMM-FRC Windows Installer
+REM This script creates a standalone Windows installer for VMM-FRC
 
 setlocal EnableDelayedExpansion
 
 echo ============================================
-echo  ACSC Windows Installer Build Script
+echo  VMM-FRC Windows Installer Build Script
 echo ============================================
 echo.
 
@@ -27,11 +27,11 @@ REM Check for required dependencies
 echo Checking dependencies...
 pip install -e ".[build]" --quiet
 
-REM Get version from acsc/__init__.py and update installer.iss
+REM Get version from vmm/__init__.py and update installer.iss
 echo.
 echo Updating version in installer.iss...
-for /f "tokens=2 delims='=""'" %%v in ('python -c "from acsc import __version__; print(__version__)"') do set VERSION=%%v
-python -c "from acsc import __version__; print(__version__)" > temp_version.txt
+for /f "tokens=2 delims='=""'" %%v in ('python -c "from vmm import __version__; print(__version__)"') do set VERSION=%%v
+python -c "from vmm import __version__; print(__version__)" > temp_version.txt
 set /p VERSION=<temp_version.txt
 del temp_version.txt
 echo Version: %VERSION%
@@ -50,7 +50,7 @@ if %ERRORLEVEL% neq 0 (
 echo.
 echo Step 1: Building executable with PyInstaller...
 echo ------------------------------------------------
-python -m PyInstaller acsc.spec --noconfirm --clean
+python -m PyInstaller vmm.spec --noconfirm --clean
 
 if %ERRORLEVEL% neq 0 (
     echo ERROR: PyInstaller build failed
@@ -62,9 +62,9 @@ echo ============================================
 echo  Build Complete!
 echo ============================================
 echo.
-echo Portable version: dist\ACSC\
+echo Portable version: dist\VMM-FRC\
 echo.
-echo Run dist\ACSC\ACSC.exe to test the application.
+echo Run dist\VMM-FRC\VMM-FRC.exe to test the application.
 echo.
 
 REM Exit here for portable-only build (comment out to enable installer)
@@ -87,7 +87,7 @@ if "!ISCC_PATH!"=="" (
     echo Please install Inno Setup 6 from: https://jrsoftware.org/isinfo.php
     echo.
     echo The PyInstaller build is complete. You can find the portable version at:
-    echo   dist\ACSC\
+    echo   dist\VMM-FRC\
     echo.
     echo After installing Inno Setup, run this script again or manually compile:
     echo   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
@@ -106,8 +106,8 @@ echo ============================================
 echo  Build Complete!
 echo ============================================
 echo.
-echo Portable version: dist\ACSC\
-echo Installer:        installer_output\ACSC_Setup_%VERSION%.exe
+echo Portable version: dist\VMM-FRC\
+echo Installer:        installer_output\VMM-FRC_Setup_%VERSION%.exe
 echo.
 
 endlocal

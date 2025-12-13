@@ -2075,8 +2075,8 @@ def detect_fiber_centers_insegt(
         - labels: 2D array of segmentation labels (only if return_labels=True)
     """
     try:
-        from acsc.insegt import KMTree, GaussFeatureExtractor, DictionaryPropagator
-        import acsc.insegt.models.utils as insegt_utils
+        from vmm.insegt import KMTree, GaussFeatureExtractor, DictionaryPropagator
+        import vmm.insegt.models.utils as insegt_utils
     except ImportError as e:
         raise ImportError(f"InSegt module not available: {e}")
 

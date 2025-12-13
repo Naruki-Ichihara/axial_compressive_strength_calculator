@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "acsc"
+name = "vmm-frc"
 dynamic = ["version"]
-description = "Axial compressive strength calculator"
+description = "Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
@@ -55,33 +55,33 @@ build = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Naruki-Ichihara/axial_compressive_strength_calculator"
-Repository = "https://github.com/Naruki-Ichihara/axial_compressive_strength_calculator"
-"Bug Tracker" = "https://github.com/Naruki-Ichihara/axial_compressive_strength_calculator/issues"
+Homepage = "https://github.com/Naruki-Ichihara/vmm-frc"
+Repository = "https://github.com/Naruki-Ichihara/vmm-frc"
+"Bug Tracker" = "https://github.com/Naruki-Ichihara/vmm-frc/issues"
 
 [project.scripts]
-acsc-gui = "acsc.gui:main"
+vmm-frc-gui = "vmm.gui:main"
 
 [tool.setuptools]
 zip-safe = false
 
 [tool.setuptools.dynamic]
-version = {attr = "acsc.__version__"}
+version = {attr = "vmm.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["acsc*"]
+include = ["vmm*"]
 exclude = ["tests*", "build*", "dist*"]
 
 [tool.setuptools.package-data]
-"acsc.insegt.models" = ["*.dll", "*.so"]
+"vmm.insegt.models" = ["*.dll", "*.so"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --cov=acsc --cov-report=term-missing"
+addopts = "-v --cov=vmm --cov-report=term-missing"
 
 [tool.black]
 line-length = 100
@@ -123,4 +123,4 @@ ignore = [
 "__init__.py" = ["F401"]
 
 [tool.ruff.isort]
-known-first-party = ["acsc"]
+known-first-party = ["vmm"]

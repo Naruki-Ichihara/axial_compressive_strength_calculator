@@ -1,12 +1,12 @@
 """
-ACSC - Axial Compressive Strength Calculator
+VMM-FRC - Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites
 
 A toolkit for analyzing fiber-reinforced composite materials.
 """
 
 __version__ = "0.0.7"
 
-from acsc.segment import (
+from vmm.segment import (
     estimate_local_vf,
     estimate_vf_distribution,
     estimate_vf_slice_by_slice,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the ACSC GUI"""
+"""Run the VMM-FRC GUI"""
 
 import sys
 import os
@@ -15,7 +15,7 @@ else:
     if sys.platform.startswith('linux'):
         os.environ['QT_QPA_PLATFORM'] = 'xcb'
 
-from acsc.gui import main
+from vmm.gui import main
 
 if __name__ == "__main__":
     main()

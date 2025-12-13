@@ -14,8 +14,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer
 from PySide6.QtGui import QFont, QPalette, QColor, QAction, QIcon, QPixmap
 import cv2 as cv
-from acsc.io import import_image_sequence, trim_image
-from acsc.analysis import compute_structure_tensor, compute_orientation, drop_edges_3D, _orientation_function, _orientation_function_reference
+from vmm.io import import_image_sequence, trim_image
+from vmm.analysis import compute_structure_tensor, compute_orientation, drop_edges_3D, _orientation_function, _orientation_function_reference
 import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -1220,7 +1220,7 @@ class HistogramPanel(QWidget):
 
                 # Write header
                 writer.writerow(['Orientation Histogram Data Export'])
-                writer.writerow(['Generated from ACSC Analysis'])
+                writer.writerow(['Generated from VMM-FRC Analysis'])
                 writer.writerow([])
 
                 # Write configuration info
@@ -3160,7 +3160,7 @@ class Viewer2D(QWidget):
         """Find the main window from the widget hierarchy"""
         widget = self
         while widget:
-            if isinstance(widget, ACSCMainWindow):
+            if isinstance(widget, VMMMainWindow):
                 return widget
             widget = widget.parent()
         return None
@@ -4002,8 +4002,8 @@ class VisualizationTab(QWidget):
 
     def generateTrajectory(self):
         """Generate fiber trajectory for selected ROIs."""
-        from acsc.fiber_trajectory import create_fiber_distribution, FiberTrajectory, detect_fiber_centers
-        from acsc.analysis import compute_structure_tensor
+        from vmm.fiber_trajectory import create_fiber_distribution, FiberTrajectory, detect_fiber_centers
+        from vmm.analysis import compute_structure_tensor
 
         # Get selected ROIs
         selected_rois = self.getSelectedROIs()
@@ -5405,10 +5405,11 @@ class VisualizationTab(QWidget):
                         if fiber_idx < len(points):
                             pt = points[fiber_idx]
                             # Convert to global coordinates (X, Y, Z for Paraview)
+                            # Use actual z position from trajectory, not slice_idx
                             fiber_points.append([
                                 pt[0] + x_offset,  # X
                                 pt[1] + y_offset,  # Y
-                                slice_idx + z_offset  # Z
+                                z + z_offset  # Z (actual slice position)
                             ])
 
                             # Get angles for this point
@@ -6221,7 +6222,7 @@ class AnalysisTab(QWidget):
 
         try:
             # Import detect_fiber_centers
-            from acsc.fiber_trajectory import detect_fiber_centers
+            from vmm.fiber_trajectory import detect_fiber_centers
 
             # Check if watershed display is enabled
             show_watershed = self.fiber_detection_settings.get('show_watershed', True)
@@ -6406,8 +6407,8 @@ class AnalysisTab(QWidget):
                 image_scaled = image_uint8
 
             # Import InSegt components
-            from acsc.insegt.fiber_model import FiberSegmentationModel
-            from acsc.insegt.annotators.dual_panel_annotator import DualPanelAnnotator
+            from vmm.insegt.fiber_model import FiberSegmentationModel
+            from vmm.insegt.annotators.dual_panel_annotator import DualPanelAnnotator
 
             # Build model
             main_window.status_label.setText("Building InSegt model...")
@@ -6531,12 +6532,12 @@ class AnalysisTab(QWidget):
         QApplication.processEvents()
 
         try:
-            from acsc.insegt.fiber_model import FiberSegmentationModel
+            from vmm.insegt.fiber_model import FiberSegmentationModel
             from scipy.ndimage import distance_transform_edt
             from skimage.feature import peak_local_max
             from skimage.segmentation import watershed
             from skimage.measure import regionprops
-            import acsc.insegt.models.utils as insegt_utils
+            import vmm.insegt.models.utils as insegt_utils
 
             # Build model from the first (training) slice at scaled resolution
             training_z = self._insegt_slice_z if hasattr(self, '_insegt_slice_z') else z_min
@@ -6750,7 +6751,7 @@ class AnalysisTab(QWidget):
 
     def computeVf(self):
         """Compute local fiber volume fraction from existing segmentation."""
-        from acsc.segment import (
+        from vmm.segment import (
             estimate_local_vf,
             estimate_vf_distribution,
         )
@@ -6986,7 +6987,7 @@ class AnalysisTab(QWidget):
                 else:  # "Z-axis"
                     reference_vector = [1, 0, 0]  # Z-axis
 
-                # Compute reference orientation using proper ACSC method
+                # Compute reference orientation using proper VMM-FRC method
                 reference_orientation = compute_orientation(structure_tensor, reference_vector)
 
                 # Trim edges from all orientation volumes using noise_scale as trim width
@@ -8975,7 +8976,7 @@ class SimulationTab(QWidget):
         if not self.main_window:
             return
 
-        from acsc.simulation import estimate_compression_strength, estimate_compression_strength_from_profile, MaterialParams
+        from vmm.simulation import estimate_compression_strength, estimate_compression_strength_from_profile, MaterialParams
 
         sim_content = self.main_window.simulation_content
 
@@ -9380,7 +9381,7 @@ class SimulationContentPanel(QWidget):
         self.std_deviation_spin.setEnabled(not use_3d)
 
 
-class ACSCMainWindow(QMainWindow):
+class VMMMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.current_volume = None
@@ -9392,11 +9393,11 @@ class ACSCMainWindow(QMainWindow):
         self.initUI()
 
     def initUI(self):
-        self.setWindowTitle("ACSC - Axial Compressive Strength Calculator")
+        self.setWindowTitle("VMM-FRC - Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites")
 
         # Set application icon
         import os
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'acsc_logo.png')
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'vmm_logo.png')
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
@@ -9869,7 +9870,7 @@ class ACSCMainWindow(QMainWindow):
         self.histogram_panel.setVisible(False)
 
 def main():
-    from acsc.splash import SplashScreen
+    from vmm.splash import SplashScreen
 
     app = QApplication(sys.argv)
 
@@ -9882,7 +9883,7 @@ def main():
     splash.setMessage("Initializing application...")
     QApplication.processEvents()
 
-    window = ACSCMainWindow()
+    window = VMMMainWindow()
 
     splash.setMessage("Ready!")
     QApplication.processEvents()

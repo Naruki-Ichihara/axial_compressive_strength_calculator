@@ -4,8 +4,8 @@ from pathlib import Path
 
 def create_ico():
     assets_dir = Path(__file__).parent / "assets"
-    png_path = assets_dir / "acsc_logo.png"
-    ico_path = assets_dir / "acsc_logo.ico"
+    png_path = assets_dir / "vmm_logo.png"
+    ico_path = assets_dir / "vmm_logo.ico"
 
     if not png_path.exists():
         print(f"Error: {png_path} not found")

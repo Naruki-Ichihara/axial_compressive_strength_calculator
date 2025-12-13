@@ -1,4 +1,4 @@
-import acsc.insegt.models.utils as utils
+import vmm.insegt.models.utils as utils
 import numpy as np
 
 

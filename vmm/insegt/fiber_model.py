@@ -9,9 +9,9 @@ import numpy as np
 import pickle
 from pathlib import Path
 
-from acsc.insegt.models.kmdict import KMTree, DictionaryPropagator
-from acsc.insegt.models.gaussfeat import GaussFeatureExtractor
-import acsc.insegt.models.utils as utils
+from vmm.insegt.models.kmdict import KMTree, DictionaryPropagator
+from vmm.insegt.models.gaussfeat import GaussFeatureExtractor
+import vmm.insegt.models.utils as utils
 
 
 class FiberSegmentationModel:
@@ -268,7 +268,7 @@ def run_insegt_annotator(image, model=None, sigmas=[1, 2, 4], patch_size=9,
         Tuple of (annotator, model) after GUI closes.
     """
     import PyQt5.QtWidgets
-    from acsc.insegt.annotators.insegtannotator import InSegtAnnotator
+    from vmm.insegt.annotators.insegtannotator import InSegtAnnotator
 
     # Ensure image is uint8
     if image.dtype == np.uint16:

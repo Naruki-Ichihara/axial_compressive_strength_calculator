@@ -1,12 +1,12 @@
 """
-Generate ACSC Logo - Minimal Kink Band Design
+Generate VMM-FRC Logo - Minimal Kink Band Design
 Represents fiber misalignment and kink bands in composite materials
 """
 import numpy as np
 import matplotlib.pyplot as plt
 
 
-def create_acsc_logo(output_path='assets/acsc_logo.png', size_inches=4, dpi=300):
+def create_vmm_logo(output_path='assets/vmm_logo.png', size_inches=4, dpi=300):
     """
     Minimal geometric version - clean and modern
     Abstract representation of fiber misalignment
@@ -44,7 +44,7 @@ def create_acsc_logo(output_path='assets/acsc_logo.png', size_inches=4, dpi=300)
 
 
 if __name__ == "__main__":
-    print("Generating ACSC logo...")
-    create_acsc_logo()
+    print("Generating VMM-FRC logo...")
+    create_vmm_logo()
     print("\nLogo generated successfully!")
-    print("- assets/acsc_logo.png: Minimal geometric version")
+    print("- assets/vmm_logo.png: Minimal geometric version")

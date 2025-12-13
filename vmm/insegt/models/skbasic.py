@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors
 import sklearn.cluster
 import scipy.sparse
-import acsc.insegt.models.segt as segt
+import vmm.insegt.models.segt as segt
 
 # HELPING FUNCTIONS
 # (originaly written for use without annotator)

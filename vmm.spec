@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec file for ACSC (Axial Compressive Strength Calculator)
+PyInstaller spec file for VMM-FRC (Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites)
 """
 
 import sys
@@ -20,7 +20,7 @@ a = Analysis(
     pathex=[str(project_root)],
     binaries=[
         # InSegt KM-Tree DLL
-        (str(project_root / 'acsc' / 'insegt' / 'models' / 'km_dict_lib.dll'), 'acsc/insegt/models'),
+        (str(project_root / 'vmm' / 'insegt' / 'models' / 'km_dict_lib.dll'), 'vmm/insegt/models'),
     ],
     datas=[
         # Include PySide6 plugins (required for Qt to work)
@@ -30,7 +30,7 @@ a = Analysis(
         # Include assets (parameters and logo)
         (str(project_root / 'assets'), 'assets'),
         # Include InSegt modules
-        (str(project_root / 'acsc' / 'insegt'), 'acsc/insegt'),
+        (str(project_root / 'vmm' / 'insegt'), 'vmm/insegt'),
     ],
     hiddenimports=[
         # NumPy and SciPy
@@ -86,24 +86,24 @@ a = Analysis(
         # OpenPyXL
         'openpyxl',
 
-        # ACSC modules
-        'acsc',
-        'acsc.analysis',
-        'acsc.io',
-        'acsc.gui',
-        'acsc.simulation',
+        # VMM modules
+        'vmm',
+        'vmm.analysis',
+        'vmm.io',
+        'vmm.gui',
+        'vmm.simulation',
 
         # InSegt modules
-        'acsc.insegt',
-        'acsc.insegt.models',
-        'acsc.insegt.models.kmdict',
-        'acsc.insegt.models.gaussfeat',
-        'acsc.insegt.models.utils',
-        'acsc.insegt.fiber_model',
-        'acsc.insegt.annotators',
-        'acsc.insegt.annotators.dual_panel_annotator',
-        'acsc.insegt.annotators.insegtannotator',
-        'acsc.insegt.annotators.annotator',
+        'vmm.insegt',
+        'vmm.insegt.models',
+        'vmm.insegt.models.kmdict',
+        'vmm.insegt.models.gaussfeat',
+        'vmm.insegt.models.utils',
+        'vmm.insegt.fiber_model',
+        'vmm.insegt.annotators',
+        'vmm.insegt.annotators.dual_panel_annotator',
+        'vmm.insegt.annotators.insegtannotator',
+        'vmm.insegt.annotators.annotator',
 
         # Pillow
         'PIL',
@@ -136,7 +136,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='ACSC',
+    name='VMM-FRC',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -147,7 +147,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/acsc_logo.ico',
+    icon='assets/vmm_logo.ico',
 )
 
 coll = COLLECT(
@@ -158,5 +158,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='ACSC',
+    name='VMM-FRC',
 )

@@ -1,12 +1,12 @@
-; Inno Setup Script for ACSC (Axial Compressive Strength Calculator)
+; Inno Setup Script for VMM-FRC (Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites)
 ; Requires Inno Setup 6.x: https://jrsoftware.org/isinfo.php
 
-#define MyAppName "ACSC"
-#define MyAppFullName "Axial Compressive Strength Calculator"
+#define MyAppName "VMM-FRC"
+#define MyAppFullName "Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites"
 #define MyAppVersion "0.0.7"
 #define MyAppPublisher "Naruki-Ichihara"
-#define MyAppURL "https://github.com/Naruki-Ichihara/axial_compressive_strength_calculator"
-#define MyAppExeName "ACSC.exe"
+#define MyAppURL "https://github.com/Naruki-Ichihara/vmm-frc"
+#define MyAppExeName "VMM-FRC.exe"
 
 [Setup]
 ; Application information
@@ -26,13 +26,13 @@ DisableProgramGroupPage=yes
 
 ; Output settings
 OutputDir=installer_output
-OutputBaseFilename=ACSC_Setup_{#MyAppVersion}
+OutputBaseFilename=VMM-FRC_Setup_{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 
 ; Visual settings
 WizardStyle=modern
-SetupIconFile=assets\acsc_logo.ico
+SetupIconFile=assets\vmm_logo.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 ; Windows version requirements
@@ -59,7 +59,7 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 
 [Files]
 ; Main application files from PyInstaller output
-Source: "dist\ACSC\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\VMM-FRC\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppFullName}"; Filename: "{app}\{#MyAppExeName}"

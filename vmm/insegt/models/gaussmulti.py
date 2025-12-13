@@ -6,9 +6,9 @@ Created on Thu Oct 14 20:41:09 2021
 @author: abda
 """
 
-from acsc.insegt.models.kmdict import KMTree, DictionaryPropagator
-from acsc.insegt.models.gaussfeat import get_gauss_feat_im
-import acsc.insegt.models.utils as utils
+from vmm.insegt.models.kmdict import KMTree, DictionaryPropagator
+from vmm.insegt.models.gaussfeat import get_gauss_feat_im
+import vmm.insegt.models.utils as utils
 import numpy as np
 import time
 

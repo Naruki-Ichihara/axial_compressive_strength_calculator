@@ -3,7 +3,7 @@
 Standalone InSegt GUI runner.
 
 This script runs InSegt annotator as a separate process to avoid Qt conflicts
-with the main ACSC application.
+with the main VMM-FRC application.
 
 Usage:
     python run_insegt_gui.py <image_path> <output_dir> [--model <model_path>]
@@ -71,8 +71,8 @@ def main():
 
     # Now import InSegt components (after QApplication is created)
     print("Loading InSegt model...")
-    from acsc.insegt.fiber_model import FiberSegmentationModel
-    from acsc.insegt.annotators.dual_panel_annotator import DualPanelAnnotator
+    from vmm.insegt.fiber_model import FiberSegmentationModel
+    from vmm.insegt.annotators.dual_panel_annotator import DualPanelAnnotator
 
     # Create or load model
     if args.model and os.path.exists(args.model):

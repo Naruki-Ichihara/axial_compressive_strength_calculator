@@ -1,4 +1,4 @@
-# Runtime hook for ACSC
+# Runtime hook for VMM-FRC
 # This hook runs before the main application starts
 
 import os

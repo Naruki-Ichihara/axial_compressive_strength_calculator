@@ -1,3 +1,3 @@
-# Axial Compressive Strength Calculator (ACSC)
+# VMM-FRC - Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites
 
-A computational framework for analyzing fiber-reinforced composite materials through 3D imaging. The system processes volumetric image data to extract fiber orientation fields, then calculates axial compressive strength using micromechanical models that account for fiber misalignment effects.
+A computational framework for analyzing fiber-reinforced composite materials through 3D imaging. The system processes volumetric image data to extract fiber orientation fields and fiber volume fraction, then enables virtual microstructure modeling and analysis.

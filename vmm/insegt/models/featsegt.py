@@ -6,10 +6,10 @@ Created on Thu Apr 22 17:07:11 2021
 @author: abda
 """
 
-from acsc.insegt.models.kmdict import KMTree, DictionaryPropagator
-from acsc.insegt.models.gaussfeat import GaussFeatureExtractor
-import acsc.insegt.models.utils as utils
-import acsc.insegt.models.segt as segt
+from vmm.insegt.models.kmdict import KMTree, DictionaryPropagator
+from vmm.insegt.models.gaussfeat import GaussFeatureExtractor
+import vmm.insegt.models.utils as utils
+import vmm.insegt.models.segt as segt
 
 
 class FeatSegt(segt.Segt):
