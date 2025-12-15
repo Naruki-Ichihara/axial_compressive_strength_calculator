@@ -12,11 +12,11 @@ const config: Config = {
   // Set the production url of your site here
   url: 'https://naruki-ichihara.github.io',
   // Set the /<baseUrl>/ pathname under which your site is served
-  baseUrl: process.env.NODE_ENV === 'development' ? '/' : '/vmm-frc/',
+  baseUrl: process.env.NODE_ENV === 'development' ? '/' : '/axial_compressive_strength_calculator/',
 
   // GitHub pages deployment config.
   organizationName: 'Naruki-Ichihara',
-  projectName: 'vmm-frc',
+  projectName: 'axial_compressive_strength_calculator',
 
   onBrokenLinks: 'throw',
 
