@@ -4,7 +4,7 @@ VMM-FRC - Virtual Microstructure Modeling for Fiber Reinforced Polymer Composite
 A toolkit for analyzing fiber-reinforced composite materials.
 """
 
-__version__ = "0.0.9"
+__version__ = "0.0.10"
 
 from vmm.segment import (
     estimate_local_vf,

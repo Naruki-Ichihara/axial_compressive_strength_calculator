@@ -50,27 +50,31 @@ When a local volume fraction map is available, the fiber spacing can be varied s
 
 #### Spacing from Volume Fraction
 
-For square packing geometry, the relationship between fiber spacing $s$ and volume fraction $V_f$ is:
+For **hexagonal close packing** geometry (the most realistic for fiber composites), the relationship between fiber center-to-center spacing $s$ and volume fraction $V_f$ is:
 
 $$
-V_f = \frac{\pi d^2 / 4}{s^2}
+V_f = \frac{\pi d^2 / 4}{s^2 \cdot \sqrt{3}/2} = \frac{\pi d^2}{2\sqrt{3} s^2}
 $$
+
+where the unit cell area for hexagonal packing is $s^2 \cdot \sqrt{3}/2$.
 
 Solving for spacing:
 
 $$
-s = d \sqrt{\frac{\pi}{4 V_f}} = \frac{d \cdot 0.886}{\sqrt{V_f}}
+s = d \sqrt{\frac{\pi}{2\sqrt{3} V_f}} = \frac{d \cdot 0.9523}{\sqrt{V_f}}
 $$
 
 where $d$ is the fiber diameter.
+
+**Note**: The maximum theoretical Vf for hexagonal packing is $\pi/(2\sqrt{3}) \approx 0.9069$ when fibers are touching ($s = d$).
 
 #### Algorithm (Fast Variable Density Poisson-Disc Sampling)
 
 The implementation uses the fast variable density Poisson-disc sampling algorithm (Dwork et al., 2021). The key insight is to use a spatial grid with cell size based on the minimum spacing $r_{min}$, and store point indices in all cells that could be affected by each point.
 
-1. **Calculate local spacing map**: Convert local Vf values to spacing requirements using the first slice of the Vf map:
+1. **Calculate local spacing map**: Convert local Vf values to spacing requirements using the first slice of the Vf map (hexagonal packing):
    $$
-   s(x, y) = \frac{d \cdot 0.886}{\sqrt{V_f(x, y)}}
+   s(x, y) = \frac{d \cdot 0.9523}{\sqrt{V_f(x, y)}}
    $$
 
 2. **Grid initialization**: Create a spatial grid with cell size equal to $r_{min}$ (the minimum spacing across all locations). Each cell stores a list of point indices.
@@ -304,3 +308,69 @@ angles = ft.fiber_angles              # Misalignment angles
 | `stop_at_boundary` | Stop tracking at domain edges |
 | `boundary_margin` | Distance from edge to stop (pixels) |
 | `detection_interval` | Slices between image-based corrections |
+
+## Advantages of Trajectory-Based Orientation Analysis
+
+### Comparison with Full-Voxel Structure Tensor Analysis
+
+When computing orientation statistics from CT scan data, there are two main approaches:
+
+1. **Full-voxel Structure Tensor (ST) analysis**: Compute orientation at every voxel in the volume and aggregate into a histogram
+2. **Trajectory-based analysis**: Track individual fibers and compute orientation along their centerlines
+
+#### Impact of Volume Fraction on Full-Voxel Analysis
+
+For composites with low fiber volume fraction (Vf), full-voxel ST analysis has a significant limitation: **the majority of voxels belong to the matrix (resin) region, not the fibers**.
+
+Consider a composite with Vf = 30%:
+- 70% of voxels are matrix material
+- Matrix regions have no well-defined fiber orientation
+- ST analysis in matrix regions produces essentially random or noise-dominated orientations
+- The resulting histogram is heavily influenced by non-fiber regions
+
+This leads to:
+- Orientation histograms that do not accurately represent the actual fiber orientation distribution
+- Artificially broad angular distributions due to matrix noise
+- Reduced sensitivity to detect true fiber misalignment patterns
+
+#### Advantages of Trajectory-Based Approach
+
+Trajectory-based orientation analysis addresses these issues by:
+
+1. **Sampling only fiber regions**: Orientation is computed exclusively along tracked fiber centerlines, completely avoiding matrix regions
+
+2. **Accurate representation**: Each data point in the orientation histogram corresponds to an actual fiber segment, not arbitrary voxel locations
+
+3. **Robust at low Vf**: Even for composites with Vf as low as 20-30%, the method produces reliable orientation statistics because it ignores the dominant matrix phase
+
+4. **Per-fiber statistics**: Enables analysis of individual fiber behavior, such as identifying fibers with anomalous orientation or tracking orientation changes along a single fiber
+
+5. **Weighted by fiber content**: The histogram naturally reflects the fiber population without being diluted by matrix contributions
+
+#### When to Use Each Method
+
+| Scenario | Recommended Method |
+|----------|-------------------|
+| High Vf (> 60%) | Either method works well |
+| Low Vf (< 50%) | Trajectory-based preferred |
+| Quick overview analysis | Full-voxel ST |
+| Detailed fiber characterization | Trajectory-based |
+| Per-fiber statistics needed | Trajectory-based |
+| Computational efficiency priority | Full-voxel ST |
+
+#### Implementation Note
+
+The trajectory-based orientation angles are computed using the same definitions as the Structure Tensor analysis to ensure consistency:
+
+**Projection Angles (with sign normalization for consistent range):**
+- **X-Z Orientation (θ)**: $\theta = \arctan2(v_{d0}, v_{axial})$, giving values in the range [-90°, 90°]
+- **Y-Z Orientation (φ)**: $\phi = \arctan2(v_{d1}, v_{axial})$, giving values in the range [-90°, 90°]
+
+where the eigenvector is oriented such that $v_{axial} \geq 0$ for consistent sign convention. When the fiber is perfectly aligned with the Z-axis, both angles are 0°.
+
+**True Azimuth Angle:**
+- **Azimuth**: $\psi = \arctan2(v_{d1}, v_{d0})$, giving values in the full range [-180°, 180°]
+
+This is the true azimuthal direction in the cross-section plane, without sign normalization. It represents the actual fiber direction in the XY plane.
+
+The X-Z and Y-Z orientations are **projection angles** that represent the fiber tilt as seen from the Y and X axes respectively. They allow direct comparison between the Structure Tensor analysis and the trajectory-based method when analyzing the same dataset.

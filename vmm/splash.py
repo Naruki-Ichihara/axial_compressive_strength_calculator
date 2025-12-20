@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 
+from vmm.theme import get_splash_colors
+
 
 class SplashScreen(QWidget):
     """Splash screen displayed during application startup."""
@@ -18,18 +20,21 @@ class SplashScreen(QWidget):
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
 
+        # Get theme colors
+        colors = get_splash_colors()
+
         # Main layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Container with sharp edges, modern dark theme
+        # Container with sharp edges
         container = QFrame()
-        container.setStyleSheet("""
-            QFrame {
-                background-color: #0d0d0d;
+        container.setStyleSheet(f"""
+            QFrame {{
+                background-color: {colors['bg']};
                 border: none;
-            }
+            }}
         """)
         container_layout = QVBoxLayout(container)
         container_layout.setSpacing(0)
@@ -38,11 +43,12 @@ class SplashScreen(QWidget):
         # Top accent line
         accent_line = QFrame()
         accent_line.setFixedHeight(3)
-        accent_line.setStyleSheet("background-color: #00a8ff;")
+        accent_line.setStyleSheet(f"background-color: {colors['accent']};")
         container_layout.addWidget(accent_line)
 
         # Content area
         content = QWidget()
+        content.setStyleSheet(f"background-color: {colors['bg']};")
         content_layout = QVBoxLayout(content)
         content_layout.setSpacing(20)
         content_layout.setContentsMargins(50, 40, 50, 30)
@@ -53,6 +59,7 @@ class SplashScreen(QWidget):
 
         # Logo
         logo_label = QLabel()
+        logo_label.setStyleSheet(f"background-color: {colors['bg']};")
         logo_path = self._get_logo_path()
         if logo_path and os.path.exists(logo_path):
             pixmap = QPixmap(logo_path)
@@ -60,30 +67,33 @@ class SplashScreen(QWidget):
             logo_label.setPixmap(scaled_pixmap)
         else:
             logo_label.setText("VMM")
-            logo_label.setStyleSheet("font-size: 36px; font-weight: bold; color: #00a8ff;")
+            logo_label.setStyleSheet(f"background-color: {colors['bg']}; font-size: 36px; font-weight: bold; color: {colors['accent']};")
         logo_label.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(logo_label)
 
         # Title block
         title_block = QWidget()
+        title_block.setStyleSheet(f"background-color: {colors['bg']};")
         title_layout = QVBoxLayout(title_block)
         title_layout.setSpacing(5)
         title_layout.setContentsMargins(0, 0, 0, 0)
 
         title_label = QLabel("VMM-FRC")
-        title_label.setStyleSheet("""
+        title_label.setStyleSheet(f"""
+            background-color: {colors['bg']};
             font-size: 32px;
             font-weight: 700;
-            color: #ffffff;
+            color: {colors['text_title']};
             letter-spacing: 4px;
         """)
         title_layout.addWidget(title_label)
 
         subtitle_label = QLabel("Virtual Microstructure Modeling for Fiber Reinforced Polymer Composites")
-        subtitle_label.setStyleSheet("""
+        subtitle_label.setStyleSheet(f"""
+            background-color: {colors['bg']};
             font-size: 12px;
             font-weight: 400;
-            color: #888888;
+            color: {colors['text_subtitle']};
             letter-spacing: 1px;
         """)
         title_layout.addWidget(subtitle_label)
@@ -98,10 +108,11 @@ class SplashScreen(QWidget):
 
         # Version
         version_label = QLabel(f"v{__version__}")
-        version_label.setStyleSheet("""
+        version_label.setStyleSheet(f"""
+            background-color: {colors['bg']};
             font-size: 11px;
             font-weight: 500;
-            color: #00a8ff;
+            color: {colors['text_version']};
             letter-spacing: 2px;
         """)
         version_label.setAlignment(Qt.AlignLeft)
@@ -109,31 +120,33 @@ class SplashScreen(QWidget):
 
         # Progress section
         progress_section = QWidget()
+        progress_section.setStyleSheet(f"background-color: {colors['bg']};")
         progress_layout = QVBoxLayout(progress_section)
         progress_layout.setSpacing(8)
         progress_layout.setContentsMargins(0, 0, 0, 0)
 
         # Loading message
         self.loading_label = QLabel("INITIALIZING")
-        self.loading_label.setStyleSheet("""
+        self.loading_label.setStyleSheet(f"""
+            background-color: {colors['bg']};
             font-size: 10px;
             font-weight: 500;
-            color: #555555;
+            color: {colors['text_loading']};
             letter-spacing: 3px;
         """)
         progress_layout.addWidget(self.loading_label)
 
         # Progress bar - thin line style
         self.progress_bar = QProgressBar()
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
                 border: none;
-                background-color: #1a1a1a;
+                background-color: {colors['progress_bg']};
                 height: 2px;
-            }
-            QProgressBar::chunk {
-                background-color: #00a8ff;
-            }
+            }}
+            QProgressBar::chunk {{
+                background-color: {colors['progress_chunk']};
+            }}
         """)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setRange(0, 0)
@@ -145,14 +158,15 @@ class SplashScreen(QWidget):
 
         # Bottom bar with copyright
         bottom_bar = QFrame()
-        bottom_bar.setStyleSheet("background-color: #0a0a0a;")
+        bottom_bar.setStyleSheet(f"background-color: {colors['bg_bottom']};")
         bottom_layout = QHBoxLayout(bottom_bar)
         bottom_layout.setContentsMargins(50, 12, 50, 12)
 
         copyright_label = QLabel("© 2025 Naruki Ichihara")
-        copyright_label.setStyleSheet("""
+        copyright_label.setStyleSheet(f"""
+            background-color: {colors['bg_bottom']};
             font-size: 9px;
-            color: #444444;
+            color: {colors['text_copyright']};
             letter-spacing: 1px;
         """)
         bottom_layout.addWidget(copyright_label)
