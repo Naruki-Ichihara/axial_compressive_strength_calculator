@@ -13,6 +13,41 @@ InSegt is a dictionary-based interactive segmentation method that uses Gaussian 
 
 The VMM-FRC implementation is based on [InSegtPy](https://github.com/vedranaa/InSegtpy).
 
+## 3-Class Segmentation
+
+VMM-FRC supports 3-class segmentation for fiber-reinforced composites:
+
+| Label | Key | Color | Class | Description |
+|-------|-----|-------|-------|-------------|
+| 1 | 1 | Cyan | Fiber | Reinforcing fibers |
+| 2 | 2 | Magenta | Matrix | Polymer matrix/background |
+| 3 | 3 | Yellow | Void | Porosity/defects |
+
+This enables simultaneous detection of fibers for volume fraction analysis and voids for quality assessment.
+
+### Labeling Tool Interface
+
+The dual-panel labeling tool provides:
+
+**Left Panel**: Original image with annotation overlay
+**Right Panel**: Real-time segmentation result
+
+**Keyboard Shortcuts:**
+- `1`: Select Fiber label (Cyan)
+- `2`: Select Matrix label (Magenta)
+- `3`: Select Void label (Yellow)
+- `0`: Eraser mode
+- `↑/↓`: Increase/decrease pen size
+- `L`: Toggle live update
+- `H`: Show help
+- `Z`: Reset zoom
+
+**Mouse Controls:**
+- Left-click + drag: Draw with current label
+- Right-click + drag: Draw Matrix (Magenta)
+- Middle-click + drag: Pan view
+- Scroll wheel: Zoom
+
 ## Method
 
 The InSegt pipeline consists of three main components:
@@ -188,8 +223,37 @@ InSegt is recommended when:
 - Image has varying contrast across regions
 - Fibers have similar intensity to some matrix regions
 - Higher accuracy is required
+- **Void detection is needed** (use 3-class segmentation)
 
 For most cases with good image quality, Otsu-based detection is faster and sufficient.
+
+## Void Analysis Integration
+
+After InSegt segmentation with void labels, you can:
+
+1. **Extract void mask**:
+```python
+from vmm.analysis import segment_voids_from_insegt
+
+void_mask = segment_voids_from_insegt(segmentation_result, void_label=3)
+```
+
+2. **Compute void statistics**:
+```python
+from vmm.analysis import compute_void_statistics
+
+stats = compute_void_statistics(void_mask)
+print(f"Void fraction: {stats['void_fraction_percent']:.2f}%")
+```
+
+3. **Mask orientation data**:
+```python
+from vmm.analysis import mask_orientation_with_voids
+
+masked_theta = mask_orientation_with_voids(theta, void_mask, dilation_pixels=3)
+```
+
+See [Void Analysis](./void-analysis) for detailed documentation.
 
 ## References
 

@@ -13,6 +13,7 @@ from typing import Optional, Tuple, Union
 def estimate_local_vf(
     segmentation: np.ndarray,
     fiber_label: int = 1,
+    void_label: Optional[int] = None,
     window_size: Union[int, Tuple[int, ...]] = 50,
     gaussian_sigma: Optional[float] = None,
     normalize: bool = True
@@ -22,13 +23,16 @@ def estimate_local_vf(
 
     This function calculates the local fiber volume fraction (Vf) by computing
     the fraction of fiber pixels within a sliding window or using Gaussian
-    weighted averaging.
+    weighted averaging. If void_label is provided, void regions are excluded
+    from the calculation (Vf = fiber / (fiber + matrix), excluding void).
 
     Args:
         segmentation: Segmented image/volume where fiber regions are labeled.
                      Can be 2D (single slice) or 3D (volume).
         fiber_label: Label value representing fiber regions in the segmentation.
-                    Default is 1 (assuming binary: 0=matrix, 1=fiber).
+                    Default is 1 (assuming: 0=background, 1=fiber, 2=matrix, 3=void).
+        void_label: Label value representing void regions. If provided, voids are
+                   excluded from Vf calculation. Default is None (no void exclusion).
         window_size: Size of the window for local Vf calculation.
                     - If int: same size for all dimensions
                     - If tuple: specific size for each dimension
@@ -43,21 +47,36 @@ def estimate_local_vf(
                    Values range from 0 (pure matrix) to 1 (pure fiber).
 
     Example:
-        >>> # Binary segmentation: 0=matrix, 1=fiber
+        >>> # Segmentation: 0=background, 1=fiber, 2=matrix, 3=void
         >>> seg = np.array([[0, 0, 1, 1],
         ...                 [0, 1, 1, 1],
-        ...                 [1, 1, 1, 0],
-        ...                 [1, 1, 0, 0]])
-        >>> vf = estimate_local_vf(seg, window_size=3)
+        ...                 [1, 1, 1, 3],
+        ...                 [1, 1, 3, 3]])
+        >>> vf = estimate_local_vf(seg, void_label=3, window_size=3)
         >>> print(vf.shape)
         (4, 4)
     """
     # Create binary fiber mask
     fiber_mask = (segmentation == fiber_label).astype(np.float64)
 
+    if void_label is not None:
+        # Create valid region mask (exclude void)
+        valid_mask = (segmentation != void_label).astype(np.float64)
+        # Also exclude background (label 0) from valid region if we want fiber/(fiber+matrix)
+        # Actually, for Vf calculation, we want fiber / (all non-void pixels that are fiber or matrix)
+        # Let's only exclude void from the denominator
+    else:
+        valid_mask = None
+
     if gaussian_sigma is not None:
         # Gaussian-weighted averaging
-        vf_map = ndimage.gaussian_filter(fiber_mask, sigma=gaussian_sigma)
+        fiber_sum = ndimage.gaussian_filter(fiber_mask, sigma=gaussian_sigma)
+        if valid_mask is not None:
+            valid_sum = ndimage.gaussian_filter(valid_mask, sigma=gaussian_sigma)
+            # Avoid division by zero
+            vf_map = np.divide(fiber_sum, valid_sum, out=np.zeros_like(fiber_sum), where=valid_sum > 0.001)
+        else:
+            vf_map = fiber_sum
     else:
         # Box averaging using uniform filter
         if isinstance(window_size, int):
@@ -65,7 +84,13 @@ def estimate_local_vf(
         else:
             size = window_size
 
-        vf_map = ndimage.uniform_filter(fiber_mask, size=size, mode='nearest')
+        fiber_sum = ndimage.uniform_filter(fiber_mask, size=size, mode='nearest')
+        if valid_mask is not None:
+            valid_sum = ndimage.uniform_filter(valid_mask, size=size, mode='nearest')
+            # Avoid division by zero
+            vf_map = np.divide(fiber_sum, valid_sum, out=np.zeros_like(fiber_sum), where=valid_sum > 0.001)
+        else:
+            vf_map = fiber_sum
 
     if normalize:
         # Ensure values are in [0, 1] range
@@ -77,6 +102,7 @@ def estimate_local_vf(
 def estimate_vf_distribution(
     segmentation: np.ndarray,
     fiber_label: int = 1,
+    void_label: Optional[int] = None,
     window_size: Union[int, Tuple[int, ...]] = 50,
     gaussian_sigma: Optional[float] = None,
     mask: Optional[np.ndarray] = None,
@@ -88,6 +114,8 @@ def estimate_vf_distribution(
     Args:
         segmentation: Segmented image/volume where fiber regions are labeled.
         fiber_label: Label value representing fiber regions.
+        void_label: Label value representing void regions. If provided, voids are
+                   excluded from Vf calculation. Default is None.
         window_size: Size of the window for local Vf calculation.
         gaussian_sigma: If provided, use Gaussian-weighted averaging.
         mask: Optional binary mask to restrict analysis to specific region.
@@ -104,11 +132,13 @@ def estimate_vf_distribution(
             - 'min': Minimum Vf
             - 'max': Maximum Vf
             - 'global_vf': Global fiber volume fraction
+            - 'void_fraction': Void fraction (if void_label provided)
     """
     # Calculate local Vf map
     vf_map = estimate_local_vf(
         segmentation,
         fiber_label=fiber_label,
+        void_label=void_label,
         window_size=window_size,
         gaussian_sigma=gaussian_sigma
     )
@@ -117,11 +147,33 @@ def estimate_vf_distribution(
     if mask is not None:
         vf_values = vf_map[mask > 0]
         fiber_mask = (segmentation == fiber_label)
-        global_vf = np.sum(fiber_mask[mask > 0]) / np.sum(mask > 0)
+        if void_label is not None:
+            # Exclude void from global Vf calculation
+            valid_mask = (segmentation != void_label) & (mask > 0)
+            fiber_count = np.sum(fiber_mask[mask > 0])
+            valid_count = np.sum(valid_mask)
+            global_vf = fiber_count / valid_count if valid_count > 0 else 0
+            # Calculate void fraction
+            void_mask = (segmentation == void_label) & (mask > 0)
+            void_fraction = np.sum(void_mask) / np.sum(mask > 0)
+        else:
+            global_vf = np.sum(fiber_mask[mask > 0]) / np.sum(mask > 0)
+            void_fraction = 0
     else:
         vf_values = vf_map.ravel()
         fiber_mask = (segmentation == fiber_label)
-        global_vf = np.mean(fiber_mask)
+        if void_label is not None:
+            # Exclude void from global Vf calculation
+            valid_mask = (segmentation != void_label)
+            fiber_count = np.sum(fiber_mask)
+            valid_count = np.sum(valid_mask)
+            global_vf = fiber_count / valid_count if valid_count > 0 else 0
+            # Calculate void fraction
+            void_mask = (segmentation == void_label)
+            void_fraction = np.mean(void_mask)
+        else:
+            global_vf = np.mean(fiber_mask)
+            void_fraction = 0
 
     # Compute histogram
     hist, bin_edges = np.histogram(vf_values, bins=bins, range=(0, 1))
@@ -133,7 +185,8 @@ def estimate_vf_distribution(
         'median': np.median(vf_values),
         'min': np.min(vf_values),
         'max': np.max(vf_values),
-        'global_vf': global_vf
+        'global_vf': global_vf,
+        'void_fraction': void_fraction
     }
 
     return hist, bin_edges, stats

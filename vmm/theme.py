@@ -210,10 +210,43 @@ def get_stylesheet():
         }}
         QCheckBox, QRadioButton {{
             color: {c['text_primary']};
+            spacing: 6px;
         }}
-        QCheckBox::indicator, QRadioButton::indicator {{
-            width: 14px;
-            height: 14px;
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 2px solid {c['border']};
+            border-radius: 3px;
+            background-color: {c['bg_input']};
+        }}
+        QCheckBox::indicator:hover {{
+            border-color: {c['accent']};
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {c['accent']};
+            border-color: {c['accent']};
+        }}
+        QCheckBox::indicator:disabled {{
+            background-color: {c['bg_secondary']};
+            border-color: {c['text_disabled']};
+        }}
+        QRadioButton::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 2px solid {c['border']};
+            border-radius: 9px;
+            background-color: {c['bg_input']};
+        }}
+        QRadioButton::indicator:hover {{
+            border-color: {c['accent']};
+        }}
+        QRadioButton::indicator:checked {{
+            background-color: {c['accent']};
+            border-color: {c['accent']};
+        }}
+        QRadioButton::indicator:disabled {{
+            background-color: {c['bg_secondary']};
+            border-color: {c['text_disabled']};
         }}
         QTabBar::tab {{
             background-color: {c['bg_secondary']};

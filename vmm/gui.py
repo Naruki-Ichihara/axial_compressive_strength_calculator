@@ -1482,10 +1482,6 @@ class Viewer2D(QWidget):
         # Colorbar reference (to prevent duplicates)
         self.histogram_colorbar = None
 
-        # Void analysis
-        self.void_threshold = 50  # Default threshold value
-        self.void_analysis_active = False  # Only active when button clicked
-
         # ROI (Region of Interest) for orientation computation
         self.roi_enabled = False
         self.roi_mode = 'rectangle'  # 'rectangle' or 'polygon'
@@ -1529,6 +1525,11 @@ class Viewer2D(QWidget):
         self.vf_roi_bounds = None
         self.vf_polygon_mask = None  # Polygon mask for VF overlay
         self.show_vf_overlay = False
+
+        # Void visualization
+        self.void_mask = None
+        self.void_roi_bounds = None
+        self.show_void_overlay = False
 
         self.initUI()
 
@@ -2399,70 +2400,6 @@ class Viewer2D(QWidget):
             self.ax_yz.text(y_min + 5, z_min + 5, roi_name, color=color, fontsize=9,
                            fontweight='bold', bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
 
-    def _renderVoidOverlay(self):
-        """Render void analysis overlay only within ROIs and display void ratio for each ROI"""
-        if not self.void_analysis_active or self.current_volume is None or not self.rois:
-            return
-
-        volume = self.current_volume
-
-        # Iterate through all ROIs
-        for roi_name, roi_data in self.rois.items():
-            bounds = roi_data['bounds']
-            z_min, z_max, y_min, y_max, x_min, x_max = bounds
-
-            # Extract ROI subvolume
-            roi_volume = volume[z_min:z_max, y_min:y_max, x_min:x_max]
-
-            # Calculate void ratio for this ROI
-            void_voxels = np.sum(roi_volume < self.void_threshold)
-            total_voxels = roi_volume.size
-            void_ratio = (void_voxels / total_voxels) * 100 if total_voxels > 0 else 0
-
-            # Store void ratio in ROI data
-            roi_data['void_ratio'] = void_ratio
-
-            # Render void overlay on slices if they intersect the ROI
-            # XY plane
-            if z_min <= self.slice_z < z_max:
-                slice_xy = volume[self.slice_z, y_min:y_max, x_min:x_max]
-                void_mask = slice_xy < self.void_threshold
-                if np.any(void_mask):
-                    # Create full-size masked array
-                    void_overlay = np.full(volume.shape[1:], np.nan)
-                    void_overlay[y_min:y_max, x_min:x_max] = np.where(void_mask, slice_xy, np.nan)
-                    void_overlay_masked = np.ma.masked_invalid(void_overlay)
-                    self.ax_xy.imshow(void_overlay_masked, cmap='Reds', origin='lower',
-                                     alpha=0.5, vmin=0, vmax=self.void_threshold, aspect='equal')
-
-            # XZ plane
-            if y_min <= self.slice_y < y_max:
-                slice_xz = volume[z_min:z_max, self.slice_y, x_min:x_max]
-                void_mask = slice_xz < self.void_threshold
-                if np.any(void_mask):
-                    void_overlay = np.full((volume.shape[0], volume.shape[2]), np.nan)
-                    void_overlay[z_min:z_max, x_min:x_max] = np.where(void_mask, slice_xz, np.nan)
-                    void_overlay_masked = np.ma.masked_invalid(void_overlay)
-                    self.ax_xz.imshow(void_overlay_masked, cmap='Reds', origin='lower',
-                                     alpha=0.5, vmin=0, vmax=self.void_threshold, aspect='equal')
-
-            # YZ plane
-            if x_min <= self.slice_x < x_max:
-                slice_yz = volume[z_min:z_max, y_min:y_max, self.slice_x]
-                void_mask = slice_yz < self.void_threshold
-                if np.any(void_mask):
-                    void_overlay = np.full((volume.shape[0], volume.shape[1]), np.nan)
-                    void_overlay[z_min:z_max, y_min:y_max] = np.where(void_mask, slice_yz, np.nan)
-                    void_overlay_masked = np.ma.masked_invalid(void_overlay)
-                    self.ax_yz.imshow(void_overlay_masked, cmap='Reds', origin='lower',
-                                     alpha=0.5, vmin=0, vmax=self.void_threshold, aspect='equal')
-
-            # Display void ratio as text near the ROI (on XY view)
-            if z_min <= self.slice_z < z_max:
-                self.ax_xy.text(x_min + 5, y_max - 10, f'{roi_name}: {void_ratio:.1f}%',
-                               color='red', fontsize=9, fontweight='bold',
-                               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='red'))
-
     def _renderFiberDetection(self):
         """Render fiber detection results on XY view (optimized)"""
         if not self.show_fiber_detection or self.fiber_detection_result is None:
@@ -2584,6 +2521,55 @@ class Viewer2D(QWidget):
             self.ax_yz.imshow(vf_slice_yz_masked, cmap='jet', origin='lower',
                              extent=extent_yz, alpha=0.5, zorder=2,
                              vmin=0, vmax=1, interpolation='bilinear')
+
+    def _renderVoidOverlay(self):
+        """Render void overlay on all slice views.
+
+        Shows void regions in red with transparency.
+        void_mask shape: (z_size, y_size, x_size) - indices within ROI
+        void_roi_bounds: [z_min, z_max, y_min, y_max, x_min, x_max] - coordinates in full volume
+        """
+        if not self.show_void_overlay or self.void_mask is None or self.void_roi_bounds is None:
+            return
+
+        z_min, z_max, y_min, y_max, x_min, x_max = self.void_roi_bounds
+
+        # Create red colormap for voids
+        from matplotlib.colors import ListedColormap
+        red_cmap = ListedColormap([[0, 0, 0, 0], [1, 0, 0, 1]])  # transparent and red
+
+        # XY view (Z slice) - void_mask[z, y, x]
+        if z_min <= self.slice_z < z_max:
+            void_z_idx = self.slice_z - z_min
+            if 0 <= void_z_idx < self.void_mask.shape[0]:
+                void_slice_xy = self.void_mask[void_z_idx, :, :].astype(np.float32)
+                # extent: [x_left, x_right, y_bottom, y_top]
+                extent_xy = [x_min, x_max, y_max, y_min]  # y_max first for correct orientation
+                self.ax_xy.imshow(void_slice_xy, cmap=red_cmap, origin='upper',
+                                 extent=extent_xy, alpha=0.6, zorder=3,
+                                 vmin=0, vmax=1, interpolation='nearest')
+
+        # XZ view (Y slice) - void_mask[:, y, :]
+        if y_min <= self.slice_y < y_max:
+            void_y_idx = self.slice_y - y_min
+            if 0 <= void_y_idx < self.void_mask.shape[1]:
+                void_slice_xz = self.void_mask[:, void_y_idx, :].astype(np.float32)
+                # extent: [x_left, x_right, z_bottom, z_top]
+                extent_xz = [x_min, x_max, z_max, z_min]  # z_max first for correct orientation
+                self.ax_xz.imshow(void_slice_xz, cmap=red_cmap, origin='upper',
+                                 extent=extent_xz, alpha=0.6, zorder=3,
+                                 vmin=0, vmax=1, interpolation='nearest')
+
+        # YZ view (X slice) - void_mask[:, :, x]
+        if x_min <= self.slice_x < x_max:
+            void_x_idx = self.slice_x - x_min
+            if 0 <= void_x_idx < self.void_mask.shape[2]:
+                void_slice_yz = self.void_mask[:, :, void_x_idx].astype(np.float32)
+                # extent: [y_left, y_right, z_bottom, z_top]
+                extent_yz = [y_min, y_max, z_max, z_min]  # z_max first for correct orientation
+                self.ax_yz.imshow(void_slice_yz, cmap=red_cmap, origin='upper',
+                                 extent=extent_yz, alpha=0.6, zorder=3,
+                                 vmin=0, vmax=1, interpolation='nearest')
 
     def enableZoom(self, enabled):
         """Enable or disable zoom mode"""
@@ -2950,9 +2936,6 @@ class Viewer2D(QWidget):
         # Draw axis arrows
         self._drawAxisArrows(self.ax_yz, 'yz', slice_yz.shape)
 
-        # Add void overlay only within ROIs
-        self._renderVoidOverlay()
-
         # Render orientation overlays if active
         self._renderOrientationOverlay()
 
@@ -2961,6 +2944,9 @@ class Viewer2D(QWidget):
 
         # Render Vf overlay if enabled
         self._renderVfOverlay()
+
+        # Render void overlay if enabled
+        self._renderVoidOverlay()
 
         # Draw ROI rectangles
         self._drawAllROIOverlays()
@@ -3069,14 +3055,14 @@ class Viewer2D(QWidget):
             self._drawAxisArrows(self.ax_yz, 'yz', slice_yz.shape)
             self.figure_yz.tight_layout()
 
-            # Add void overlay only within ROIs
-            self._renderVoidOverlay()
-
             # Check if orientation overlay should be shown
             self._renderOrientationOverlay()
 
             # Render Vf overlay if enabled
             self._renderVfOverlay()
+
+            # Render void overlay if enabled
+            self._renderVoidOverlay()
 
             # Render dual histograms - intensity (left) and orientation (right)
             import matplotlib.pyplot as plt
@@ -3104,10 +3090,6 @@ class Viewer2D(QWidget):
             self.ax_hist_intensity.fill_between(bin_centers, density, alpha=0.3, color='gray')
             self.ax_hist_intensity.set_xlim(hist_vmin, hist_vmax)
             self.ax_hist_intensity.set_ylim(bottom=0)
-
-            # Add static red threshold line (not draggable)
-            self.ax_hist_intensity.axvline(x=self.void_threshold, color='red',
-                                          linewidth=2, linestyle='--', alpha=0.8)
 
             # Clear and update intensity colorbar
             self.ax_hist_intensity_cbar.clear()
@@ -6089,6 +6071,23 @@ class AnalysisTab(QWidget):
         self.segmentation_roi_bounds = None
         self.segmentation_polygon_mask = None  # Polygon mask for Vf calculation
 
+        # Void analysis settings
+        self.void_analysis_settings = {
+            'method': 'otsu',
+            'manual_threshold': 128,
+            'invert': True,
+            'min_size': 0,
+            'closing_size': 0,
+            'compute_statistics': True,
+            'compute_local_vf': False,
+            'local_window_size': 50,
+        }
+
+        # Void analysis results
+        self.void_mask = None
+        self.void_statistics = None
+        self.void_local_fraction = None
+
     def openFiberDetectionSettings(self):
         """Open fiber detection settings dialog"""
         dialog = FiberDetectionSettingsDialog(self, self.fiber_detection_settings)
@@ -6529,6 +6528,9 @@ class AnalysisTab(QWidget):
             total_fibers = 0
             all_diameters = []
 
+            # Store InSegt multi-class segmentation (1=fiber, 2=matrix, 3=void)
+            insegt_segmentation_volume = np.zeros((n_slices, y_max - y_min, x_max - x_min), dtype=np.uint8)
+
             for i, z in enumerate(range(z_min, z_max)):
                 main_window.progress_bar.setValue(i + 1)
                 if i % 10 == 0:
@@ -6565,6 +6567,13 @@ class AnalysisTab(QWidget):
                     )
                 else:
                     segmentation = segmentation_small
+
+                # Store full multi-class segmentation for void analysis
+                # Labels: 1=fiber, 2=matrix, 3=void
+                seg_slice = segmentation.copy()
+                if polygon_mask_3d is not None:
+                    seg_slice[~polygon_mask_3d[i]] = 0
+                insegt_segmentation_volume[i] = seg_slice
 
                 # Fiber is class 1
                 binary = (segmentation == 1)
@@ -6631,33 +6640,30 @@ class AnalysisTab(QWidget):
             main_window.progress_bar.setValue(n_slices + 1)
             main_window.showProgress(False)
 
+            # Always store InSegt multi-class segmentation volume for void analysis
+            # Labels: 0=background, 1=fiber, 2=matrix, 3=void
+            # This preserves all three classes from InSegt annotation
+            self.segmentation_volume = insegt_segmentation_volume
+            self.segmentation_roi_bounds = bounds
+            self.segmentation_polygon_mask = polygon_mask_3d  # Store for Vf calculation
+
             if total_fibers == 0:
-                QMessageBox.information(self, "Result", "No fibers detected with InSegt model.")
-                main_window.status_label.setText("No fibers detected")
+                # No fibers detected, but segmentation is still available for void analysis
+                QMessageBox.information(
+                    self, "Result",
+                    "No fibers detected with InSegt model.\n\n"
+                    "Segmentation results are still available for void analysis."
+                )
+                main_window.status_label.setText("No fibers detected (segmentation saved)")
                 return
 
-            # Store results
+            # Store fiber detection results
             main_window.viewer.fiber_detection_result = {
                 'all_slices': all_slice_results,
                 'roi_offset': (x_min, y_min),
                 'roi_bounds': bounds,
                 'settings': self.fiber_detection_settings.copy()
             }
-
-            # Build and store segmentation volume for Vf calculation
-            seg_volume = np.zeros((n_slices, y_max - y_min, x_max - x_min), dtype=np.uint8)
-            for z, slice_data in all_slice_results.items():
-                labels = slice_data.get('labels')
-                if labels is not None:
-                    seg_slice = (labels > 0).astype(np.uint8)
-                    # Apply polygon mask to segmentation
-                    if polygon_mask_3d is not None:
-                        seg_slice[~polygon_mask_3d[z - z_min]] = 0
-                    seg_volume[z - z_min] = seg_slice
-
-            self.segmentation_volume = seg_volume
-            self.segmentation_roi_bounds = bounds
-            self.segmentation_polygon_mask = polygon_mask_3d  # Store for Vf calculation
 
             main_window.viewer.show_fiber_detection = True
             main_window.viewer.renderVolume()
@@ -6759,6 +6765,7 @@ class AnalysisTab(QWidget):
             vf_map = estimate_local_vf(
                 segmentation,
                 fiber_label=1,
+                void_label=3,  # Exclude void from Vf calculation
                 window_size=window_size,
                 gaussian_sigma=gaussian_sigma
             )
@@ -6778,17 +6785,22 @@ class AnalysisTab(QWidget):
                 hist, bin_edges, stats = estimate_vf_distribution(
                     segmentation,
                     fiber_label=1,
+                    void_label=3,  # Exclude void from Vf calculation
                     window_size=window_size,
                     gaussian_sigma=gaussian_sigma
                 )
-                # Recalculate global_vf using only polygon region
+                # Recalculate global_vf using only polygon region (excluding void)
                 fiber_pixels = np.sum(segmentation[polygon_mask_3d] == 1)
+                void_pixels = np.sum(segmentation[polygon_mask_3d] == 3)
                 total_pixels = np.sum(polygon_mask_3d)
-                stats['global_vf'] = fiber_pixels / total_pixels if total_pixels > 0 else 0
+                valid_pixels = total_pixels - void_pixels
+                stats['global_vf'] = fiber_pixels / valid_pixels if valid_pixels > 0 else 0
+                stats['void_fraction'] = void_pixels / total_pixels if total_pixels > 0 else 0
             else:
                 hist, bin_edges, stats = estimate_vf_distribution(
                     segmentation,
                     fiber_label=1,
+                    void_label=3,  # Exclude void from Vf calculation
                     window_size=window_size,
                     gaussian_sigma=gaussian_sigma
                 )
@@ -6817,6 +6829,7 @@ class AnalysisTab(QWidget):
 
             # Show results dialog
             smoothing_info = f"Gaussian sigma: {gaussian_sigma} px" if use_gaussian else "Box averaging"
+            void_info = f"\n  Void fraction: {stats.get('void_fraction', 0)*100:.2f}%" if stats.get('void_fraction', 0) > 0 else ""
             msg = (
                 f"Volume Fraction Analysis Complete\n\n"
                 f"Window size: {window_size} px\n"
@@ -6826,11 +6839,12 @@ class AnalysisTab(QWidget):
                 f"  Mean local Vf: {stats['mean']*100:.1f}%\n"
                 f"  Std deviation: {stats['std']*100:.1f}%\n"
                 f"  Min Vf: {stats['min']*100:.1f}%\n"
-                f"  Max Vf: {stats['max']*100:.1f}%"
+                f"  Max Vf: {stats['max']*100:.1f}%{void_info}"
             )
 
+            void_status = f", void={stats.get('void_fraction', 0)*100:.2f}%" if stats.get('void_fraction', 0) > 0 else ""
             main_window.status_label.setText(
-                f"Vf computed: mean={stats['mean']*100:.1f}%, global={stats['global_vf']*100:.1f}%"
+                f"Vf computed: mean={stats['mean']*100:.1f}%, global={stats['global_vf']*100:.1f}%{void_status}"
             )
 
             # Enable Vf export button in MainWindow's ribbon
@@ -6864,36 +6878,6 @@ class AnalysisTab(QWidget):
                     main_window.edit_roi_btn.setText("Edit\nROI")
                 if hasattr(main_window, 'compute_btn'):
                     main_window.compute_btn.setEnabled(True)
-
-    def computeVoidAnalysis(self):
-        """Compute void analysis for all ROIs"""
-        main_window = getattr(self, 'main_window', None)
-
-        if not main_window:
-            print("No main window reference")
-            return
-
-        if main_window.current_volume is None:
-            print("No volume loaded - please import a volume first")
-            main_window.status_label.setText("No volume loaded - please import a volume first")
-            return
-
-        if not main_window.viewer.rois:
-            print("No ROIs defined - please create at least one ROI first")
-            main_window.status_label.setText("No ROIs defined - please create ROI first")
-            return
-
-        # Get threshold value from slider
-        threshold = main_window.threshold_slider.value()
-        main_window.viewer.void_threshold = threshold
-
-        # Activate void analysis
-        main_window.viewer.void_analysis_active = True
-
-        # Trigger re-render to show void overlay
-        main_window.viewer.renderVolume()
-
-        main_window.status_label.setText(f"Void analysis computed with threshold={threshold}")
 
     def toggleMagnify(self, checked):
         """Toggle magnify/zoom mode for slice viewers"""
@@ -7024,6 +7008,10 @@ class AnalysisTab(QWidget):
                 theta_trimmed = np.where(mask_trimmed, theta_trimmed, np.nan)
                 phi_trimmed = np.where(mask_trimmed, phi_trimmed, np.nan)
                 reference_trimmed = np.where(mask_trimmed, reference_trimmed, np.nan)
+
+            # Initialize orientation_data if None (e.g., after Reset All)
+            if main_window.orientation_data is None:
+                main_window.orientation_data = {}
 
             # Store trimmed orientation data and trim information
             main_window.orientation_data['theta'] = theta_trimmed
@@ -7251,6 +7239,455 @@ class AnalysisTab(QWidget):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
+
+    def openVoidSettings(self):
+        """Open void analysis settings dialog."""
+        # Check if InSegt results are available
+        insegt_available = self.segmentation_volume is not None
+
+        dialog = VoidAnalysisSettingsDialog(
+            self,
+            self.void_analysis_settings,
+            insegt_available=insegt_available
+        )
+        if dialog.exec() == QDialog.Accepted:
+            self.void_analysis_settings = dialog.getSettings()
+
+    def runVoidAnalysis(self):
+        """Run void analysis on volume data."""
+        from vmm.analysis import (
+            segment_voids_otsu, segment_voids_from_insegt,
+            compute_void_statistics, compute_local_void_fraction
+        )
+
+        main_window = getattr(self, 'main_window', None)
+
+        if not main_window:
+            print("No main window reference")
+            return
+
+        if main_window.current_volume is None:
+            QMessageBox.warning(self, "Warning", "No volume loaded - please import a volume first")
+            return
+
+        method = self.void_analysis_settings.get('method', 'otsu')
+
+        # For InSegt method, check if segmentation is available
+        if method == 'insegt' and self.segmentation_volume is None:
+            QMessageBox.warning(
+                self, "Warning",
+                "InSegt segmentation results not available.\n"
+                "Please run InSegt segmentation first, or use Otsu/Manual method."
+            )
+            return
+
+        # Show ROI selection dialog (optional - use Full Volume if no ROI)
+        if main_window.viewer.rois:
+            dialog = ROISelectDialog(
+                main_window, main_window.viewer.rois,
+                title="Select ROI for Void Analysis",
+                button_text="Analyze"
+            )
+            if dialog.exec() != QDialog.Accepted:
+                return  # User cancelled
+
+            selected_rois = dialog.getSelectedROIs()
+            if selected_rois:
+                roi_name = selected_rois[0]
+                roi_data = main_window.viewer.rois[roi_name]
+                roi_bounds = roi_data['bounds']
+                # bounds is [z_min, z_max, y_min, y_max, x_min, x_max]
+                z_start, z_end = roi_bounds[0], roi_bounds[1]
+                y_start, y_end = roi_bounds[2], roi_bounds[3]
+                x_start, x_end = roi_bounds[4], roi_bounds[5]
+                volume = main_window.current_volume[z_start:z_end, y_start:y_end, x_start:x_end]
+            else:
+                # Use full volume
+                volume = main_window.current_volume
+                roi_bounds = None
+        else:
+            # No ROIs defined, use full volume
+            volume = main_window.current_volume
+            roi_bounds = None
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+
+            # Segment voids based on method
+            if method == 'otsu':
+                void_mask, threshold = segment_voids_otsu(
+                    volume,
+                    invert=self.void_analysis_settings.get('invert', True),
+                    min_size=self.void_analysis_settings.get('min_size', 0),
+                    closing_size=self.void_analysis_settings.get('closing_size', 0)
+                )
+                print(f"[Void Analysis] Otsu threshold: {threshold:.1f}")
+
+            elif method == 'insegt':
+                # For InSegt method, use the stored segmentation volume directly
+                # The segmentation_volume is already cropped to the ROI used during InSegt
+                # so we should NOT apply roi_bounds again
+                seg_volume = self.segmentation_volume
+
+                # Debug info
+                print(f"[Void Analysis] InSegt segmentation volume shape: {seg_volume.shape}")
+                unique_labels = np.unique(seg_volume)
+                print(f"[Void Analysis] Unique labels in segmentation: {unique_labels}")
+                void_count = np.sum(seg_volume == 3)
+                print(f"[Void Analysis] Void label (3) voxel count: {void_count}")
+
+                void_mask = segment_voids_from_insegt(seg_volume, void_label=3)
+
+            else:  # manual
+                threshold = self.void_analysis_settings.get('manual_threshold', 128)
+                invert = self.void_analysis_settings.get('invert', True)
+
+                if invert:
+                    void_mask = volume < threshold
+                else:
+                    void_mask = volume > threshold
+
+                # Apply min_size filter
+                min_size = self.void_analysis_settings.get('min_size', 0)
+                if min_size > 0:
+                    from skimage.measure import label, regionprops
+                    labeled = label(void_mask)
+                    for region in regionprops(labeled):
+                        if region.area < min_size:
+                            void_mask[labeled == region.label] = False
+
+            # Store void mask
+            self.void_mask = void_mask
+
+            # Pass void mask to viewer for visualization
+            if roi_bounds is not None:
+                void_roi_bounds = roi_bounds
+            else:
+                # Full volume bounds
+                vol_shape = main_window.current_volume.shape
+                void_roi_bounds = [0, vol_shape[0], 0, vol_shape[1], 0, vol_shape[2]]
+
+            # For InSegt method, use the stored segmentation ROI bounds
+            if method == 'insegt' and hasattr(self, 'segmentation_roi_bounds') and self.segmentation_roi_bounds is not None:
+                void_roi_bounds = self.segmentation_roi_bounds
+
+            main_window.viewer.void_mask = void_mask
+            main_window.viewer.void_roi_bounds = void_roi_bounds
+            main_window.viewer.show_void_overlay = True
+            main_window.viewer.renderVolume()
+
+            # Add void toggle to pipeline panel
+            if hasattr(main_window, 'addVoidToggle'):
+                main_window.addVoidToggle()
+
+            # Compute statistics if requested
+            if self.void_analysis_settings.get('compute_statistics', True):
+                self.void_statistics = compute_void_statistics(void_mask)
+            else:
+                self.void_statistics = None
+
+            # Compute local void fraction if requested
+            if self.void_analysis_settings.get('compute_local_vf', False):
+                window_size = self.void_analysis_settings.get('local_window_size', 50)
+                self.void_local_fraction = compute_local_void_fraction(void_mask, window_size=window_size)
+            else:
+                self.void_local_fraction = None
+
+            QApplication.restoreOverrideCursor()
+
+            # Show results
+            self._showVoidAnalysisResults()
+
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Void analysis failed: {str(e)}")
+
+    def _showVoidAnalysisResults(self):
+        """Display void analysis results in a dialog."""
+        if self.void_mask is None:
+            return
+
+        # Calculate basic void fraction
+        void_fraction = np.mean(self.void_mask) * 100
+
+        result_text = f"Void Fraction: {void_fraction:.2f}%\n\n"
+
+        if self.void_statistics:
+            stats = self.void_statistics
+            result_text += f"Number of Voids: {stats['num_voids']}\n"
+            result_text += f"Total Void Volume: {stats['total_void_volume']:.0f} voxels\n"
+            result_text += f"Mean Void Size: {stats['mean_void_size']:.1f} voxels\n"
+            result_text += f"Max Void Size: {stats['max_void_size']:.0f} voxels\n"
+            result_text += f"Mean Sphericity: {stats['mean_sphericity']:.3f}\n"
+
+        # Show histogram of void sizes if available
+        if self.void_statistics and len(self.void_statistics.get('void_sizes', [])) > 0:
+            # Create a dialog with histogram
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Void Analysis Results")
+            dialog.setMinimumSize(600, 500)
+
+            layout = QVBoxLayout(dialog)
+
+            # Text results
+            text_label = QLabel(result_text)
+            text_label.setStyleSheet("font-family: monospace;")
+            layout.addWidget(text_label)
+
+            # Histogram
+            fig = Figure(figsize=(6, 4))
+            canvas = FigureCanvas(fig)
+            ax = fig.add_subplot(111)
+
+            sizes = self.void_statistics['void_sizes']
+            ax.hist(sizes, bins=50, edgecolor='black', alpha=0.7)
+            ax.set_xlabel('Void Size (voxels)')
+            ax.set_ylabel('Count')
+            ax.set_title('Void Size Distribution')
+            if len(sizes) > 0 and np.min(sizes) > 0:
+                ax.set_xscale('log')
+
+            fig.tight_layout()
+            layout.addWidget(canvas)
+
+            # Close button
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+
+            dialog.exec()
+        else:
+            # Simple message box
+            QMessageBox.information(self, "Void Analysis Results", result_text)
+
+    def cropOrientationWithVoid(self):
+        """Crop orientation data using void mask."""
+        from vmm.analysis import mask_orientation_with_voids
+
+        main_window = getattr(self, 'main_window', None)
+        if not main_window:
+            QMessageBox.warning(self, "Warning", "No main window reference")
+            return
+
+        # Check for orientation data - stored in orientation_data dict
+        orientation_available = (
+            hasattr(main_window, 'orientation_data') and
+            main_window.orientation_data is not None and
+            main_window.orientation_data.get('theta') is not None
+        )
+
+        # Check for void mask
+        void_available = self.void_mask is not None
+
+        # Show dialog
+        dialog = CropOrientationDialog(
+            self,
+            void_available=void_available,
+            orientation_available=orientation_available
+        )
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        settings = dialog.getSettings()
+        dilation_pixels = settings['dilation_pixels']
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+
+            # Get orientation data from orientation_data dict
+            theta = main_window.orientation_data['theta']
+            phi = main_window.orientation_data.get('phi', None)
+
+            # Get void mask and align with orientation data
+            void_mask = self.void_mask
+            void_roi_bounds = getattr(self, 'segmentation_roi_bounds', None)
+
+            # Debug: print shapes and bounds
+            print(f"[Crop Orientation] Theta shape: {theta.shape}")
+            print(f"[Crop Orientation] Void mask shape: {void_mask.shape}")
+            print(f"[Crop Orientation] Void mask has voids: {np.any(void_mask)} (count: {np.sum(void_mask)})")
+            print(f"[Crop Orientation] Void ROI bounds: {void_roi_bounds}")
+
+            # If we have ROI bounds for void, we need to create aligned mask
+            if void_roi_bounds is not None:
+                # void_roi_bounds is in volume coordinates: [z_min, z_max, y_min, y_max, x_min, x_max]
+                # void_mask shape matches the ROI size from void_roi_bounds
+                # theta is already trimmed (has trim_width removed from edges)
+
+                # Calculate the size difference (trim_width applied to theta)
+                void_size = void_mask.shape  # e.g., (30, 112, 127) - original ROI size
+                theta_size = theta.shape     # e.g., (10, 92, 107) - trimmed ROI size
+
+                # Calculate trim amounts (theta is smaller due to edge trimming)
+                z_trim = (void_size[0] - theta_size[0]) // 2
+                y_trim = (void_size[1] - theta_size[1]) // 2
+                x_trim = (void_size[2] - theta_size[2]) // 2
+
+                print(f"[Crop Orientation] Trim amounts: z={z_trim}, y={y_trim}, x={x_trim}")
+
+                # Extract the central region of void_mask that matches theta
+                z_start = max(0, z_trim)
+                z_end = z_start + theta_size[0]
+                y_start = max(0, y_trim)
+                y_end = y_start + theta_size[1]
+                x_start = max(0, x_trim)
+                x_end = x_start + theta_size[2]
+
+                # Ensure we don't exceed void_mask bounds
+                z_end = min(z_end, void_size[0])
+                y_end = min(y_end, void_size[1])
+                x_end = min(x_end, void_size[2])
+
+                # Extract aligned void mask
+                void_mask_aligned = void_mask[z_start:z_end, y_start:y_end, x_start:x_end].copy()
+
+                print(f"[Crop Orientation] Extracted void mask region [{z_start}:{z_end}, {y_start}:{y_end}, {x_start}:{x_end}]")
+                print(f"[Crop Orientation] Aligned void mask shape: {void_mask_aligned.shape}")
+                print(f"[Crop Orientation] Aligned void mask has voids: {np.any(void_mask_aligned)} (count: {np.sum(void_mask_aligned)})")
+
+                # If shapes still don't match, create padded/cropped mask
+                if void_mask_aligned.shape != theta.shape:
+                    print(f"[Crop Orientation] Shape mismatch, adjusting mask to theta shape")
+                    full_void_mask = np.zeros(theta.shape, dtype=bool)
+                    # Copy what we can
+                    copy_z = min(void_mask_aligned.shape[0], theta.shape[0])
+                    copy_y = min(void_mask_aligned.shape[1], theta.shape[1])
+                    copy_x = min(void_mask_aligned.shape[2], theta.shape[2])
+                    full_void_mask[:copy_z, :copy_y, :copy_x] = void_mask_aligned[:copy_z, :copy_y, :copy_x]
+                    void_mask_aligned = full_void_mask
+                    print(f"[Crop Orientation] Final aligned mask has voids: {np.any(void_mask_aligned)} (count: {np.sum(void_mask_aligned)})")
+            else:
+                # Assume void mask is same size as orientation
+                if void_mask.shape != theta.shape:
+                    QMessageBox.warning(
+                        self, "Warning",
+                        f"Void mask shape {void_mask.shape} does not match "
+                        f"orientation shape {theta.shape}."
+                    )
+                    QApplication.restoreOverrideCursor()
+                    return
+                void_mask_aligned = void_mask
+
+            # Check if void mask has any valid data
+            if void_mask_aligned.size == 0 or not np.any(void_mask_aligned):
+                QMessageBox.warning(
+                    self, "Warning",
+                    "No void regions found in the mask.\n"
+                    "Please run void analysis first or check your segmentation results."
+                )
+                QApplication.restoreOverrideCursor()
+                return
+
+            # Apply masking
+            if phi is not None:
+                masked_theta, masked_phi = mask_orientation_with_voids(
+                    theta, void_mask_aligned, dilation_pixels, phi
+                )
+                main_window.orientation_phi = masked_phi
+            else:
+                masked_theta = mask_orientation_with_voids(
+                    theta, void_mask_aligned, dilation_pixels
+                )
+
+            # Store masked orientation in orientation_data dict
+            main_window.orientation_data['theta'] = masked_theta
+            if phi is not None:
+                main_window.orientation_data['phi'] = masked_phi
+
+            # Update ROI orientation data with masking applied
+            # The masked_theta is already in ROI-local coordinates (same size as ROI theta)
+            rois_updated = 0
+            if hasattr(main_window, 'viewer') and hasattr(main_window.viewer, 'rois'):
+                for roi_name, roi_data in main_window.viewer.rois.items():
+                    if 'theta' in roi_data and roi_data['theta'] is not None:
+                        print(f"[Crop Orientation] ROI '{roi_name}' theta shape: {roi_data['theta'].shape}")
+                        print(f"[Crop Orientation] masked_theta shape: {masked_theta.shape}")
+                        # masked_theta is already cropped to ROI size, just assign directly
+                        # But we need to check if shapes match
+                        if roi_data['theta'].shape == masked_theta.shape:
+                            roi_data['theta'] = masked_theta.astype(np.float32)
+                            rois_updated += 1
+                            print(f"[Crop Orientation] ROI '{roi_name}' theta updated")
+
+                            # Also update phi if available
+                            if phi is not None and 'phi' in roi_data:
+                                roi_data['phi'] = masked_phi.astype(np.float32)
+
+                            # Also update angle if present
+                            if 'angle' in roi_data and roi_data['angle'] is not None:
+                                if roi_data['angle'].shape == masked_theta.shape:
+                                    # Apply same mask to angle data
+                                    masked_angle = roi_data['angle'].copy().astype(np.float64)
+                                    masked_angle[np.isnan(masked_theta)] = np.nan
+                                    roi_data['angle'] = masked_angle.astype(np.float32)
+                                    print(f"[Crop Orientation] ROI '{roi_name}' angle updated")
+                        else:
+                            print(f"[Crop Orientation] Shape mismatch for ROI '{roi_name}', skipping")
+
+            QApplication.restoreOverrideCursor()
+
+            # Count masked voxels
+            num_masked = np.sum(np.isnan(masked_theta))
+            total_voxels = masked_theta.size
+            mask_percent = (num_masked / total_voxels) * 100
+
+            # Update viewer and histogram if requested
+            if settings['update_viewer']:
+                main_window.viewer.renderVolume()
+
+                # Update histogram to reflect masked data
+                if hasattr(self, 'updateHistogram'):
+                    self.updateHistogram()
+                elif hasattr(main_window, 'analysis_tab') and hasattr(main_window.analysis_tab, 'updateHistogram'):
+                    main_window.analysis_tab.updateHistogram()
+
+            # Export if requested
+            if settings['export_vtk']:
+                self._exportMaskedOrientationVTK(masked_theta, phi if phi is None else masked_phi)
+
+            result_msg = (
+                f"Orientation data masked with void regions.\n\n"
+                f"Dilation: {dilation_pixels} pixels\n"
+                f"Masked voxels: {num_masked:,} ({mask_percent:.2f}%)\n"
+                f"Valid voxels: {total_voxels - num_masked:,}"
+            )
+            if rois_updated > 0:
+                result_msg += f"\n\nROIs updated: {rois_updated}\n(Histograms will reflect masked data)"
+
+            QMessageBox.information(self, "Crop Orientation Complete", result_msg)
+
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Failed to crop orientation: {str(e)}")
+
+    def _exportMaskedOrientationVTK(self, theta, phi=None):
+        """Export masked orientation to VTK file."""
+        from vmm.io import export_orientation_to_vtk
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Masked Orientation",
+            "",
+            "VTK Files (*.vtk);;All Files (*)"
+        )
+
+        if filepath:
+            try:
+                export_orientation_to_vtk(filepath, theta, phi)
+                QMessageBox.information(
+                    self, "Export Complete",
+                    f"Masked orientation exported to:\n{filepath}"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Export Error",
+                    f"Failed to export: {str(e)}"
+                )
 
 
 class CoordinateROIDialog(QDialog):
@@ -8728,6 +9165,292 @@ class InSegtSettingsDialog(QDialog):
         }
 
 
+class VoidAnalysisSettingsDialog(QDialog):
+    """Dialog for Void Analysis settings."""
+    def __init__(self, parent=None, settings=None, insegt_available=False):
+        super().__init__(parent)
+        self.setWindowTitle("Void Analysis Settings")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        self.insegt_available = insegt_available
+
+        self.settings = settings or {
+            'method': 'otsu',  # 'otsu', 'insegt', 'manual'
+            'manual_threshold': 128,
+            'invert': True,
+            'min_size': 0,
+            'closing_size': 0,
+            'compute_statistics': True,
+            'compute_local_vf': False,
+            'local_window_size': 50,
+        }
+
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Method selection group
+        method_group = QGroupBox("Segmentation Method")
+        method_layout = QVBoxLayout(method_group)
+
+        self.method_btn_group = QButtonGroup(self)
+
+        # Otsu method
+        self.otsu_radio = QRadioButton("Otsu's Method (automatic threshold)")
+        self.otsu_radio.setToolTip(
+            "Automatically determines the optimal threshold to separate\n"
+            "void regions from material using Otsu's algorithm."
+        )
+        self.method_btn_group.addButton(self.otsu_radio, 0)
+        method_layout.addWidget(self.otsu_radio)
+
+        # InSegt method
+        self.insegt_radio = QRadioButton("InSegt Labels (use labeled voids)")
+        self.insegt_radio.setToolTip(
+            "Use void regions (label 3/Yellow) from InSegt segmentation.\n"
+            "Fiber and matrix labels are treated as non-void."
+        )
+        self.insegt_radio.setEnabled(self.insegt_available)
+        if not self.insegt_available:
+            self.insegt_radio.setText("InSegt Labels (run InSegt first)")
+            self.insegt_radio.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        self.method_btn_group.addButton(self.insegt_radio, 1)
+        method_layout.addWidget(self.insegt_radio)
+
+        # Manual threshold
+        manual_widget = QWidget()
+        manual_layout = QHBoxLayout(manual_widget)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.manual_radio = QRadioButton("Manual Threshold:")
+        self.manual_radio.setToolTip("Manually specify the threshold value.")
+        self.method_btn_group.addButton(self.manual_radio, 2)
+        manual_layout.addWidget(self.manual_radio)
+
+        self.threshold_spin = QSpinBox()
+        self.threshold_spin.setRange(0, 65535)
+        self.threshold_spin.setValue(self.settings.get('manual_threshold', 128))
+        self.threshold_spin.setEnabled(False)
+        self.threshold_spin.setToolTip("Threshold value (voids below this value)")
+        manual_layout.addWidget(self.threshold_spin)
+        manual_layout.addStretch()
+
+        method_layout.addWidget(manual_widget)
+
+        # Connect radio buttons to enable/disable threshold spin
+        self.manual_radio.toggled.connect(self.threshold_spin.setEnabled)
+
+        # Set initial selection
+        method = self.settings.get('method', 'otsu')
+        if method == 'insegt' and self.insegt_available:
+            self.insegt_radio.setChecked(True)
+        elif method == 'manual':
+            self.manual_radio.setChecked(True)
+            self.threshold_spin.setEnabled(True)
+        else:
+            self.otsu_radio.setChecked(True)
+
+        layout.addWidget(method_group)
+
+        # Otsu/Manual options group
+        options_group = QGroupBox("Threshold Options")
+        options_layout = QFormLayout(options_group)
+
+        self.invert_check = QCheckBox("Voids are darker than material")
+        self.invert_check.setChecked(self.settings.get('invert', True))
+        self.invert_check.setToolTip(
+            "Check if voids appear as dark regions in the image.\n"
+            "Uncheck if voids appear bright."
+        )
+        options_layout.addRow("", self.invert_check)
+
+        self.min_size_spin = QSpinBox()
+        self.min_size_spin.setRange(0, 10000)
+        self.min_size_spin.setValue(self.settings.get('min_size', 0))
+        self.min_size_spin.setSuffix(" voxels")
+        self.min_size_spin.setToolTip("Remove void regions smaller than this size (0 = keep all)")
+        options_layout.addRow("Min Void Size:", self.min_size_spin)
+
+        self.closing_spin = QSpinBox()
+        self.closing_spin.setRange(0, 10)
+        self.closing_spin.setValue(self.settings.get('closing_size', 0))
+        self.closing_spin.setToolTip("Morphological closing iterations (fills small holes, 0 = disabled)")
+        options_layout.addRow("Closing Size:", self.closing_spin)
+
+        layout.addWidget(options_group)
+
+        # Analysis options
+        analysis_group = QGroupBox("Analysis Options")
+        analysis_layout = QVBoxLayout(analysis_group)
+
+        self.stats_check = QCheckBox("Compute void statistics")
+        self.stats_check.setChecked(self.settings.get('compute_statistics', True))
+        self.stats_check.setToolTip(
+            "Calculate statistics including void count, sizes,\n"
+            "sphericity, and spatial distribution."
+        )
+        analysis_layout.addWidget(self.stats_check)
+
+        local_vf_widget = QWidget()
+        local_vf_layout = QHBoxLayout(local_vf_widget)
+        local_vf_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.local_vf_check = QCheckBox("Compute local void fraction (window:")
+        self.local_vf_check.setChecked(self.settings.get('compute_local_vf', False))
+        self.local_vf_check.setToolTip("Create a map of local void concentration")
+        local_vf_layout.addWidget(self.local_vf_check)
+
+        self.local_window_spin = QSpinBox()
+        self.local_window_spin.setRange(5, 200)
+        self.local_window_spin.setValue(self.settings.get('local_window_size', 50))
+        self.local_window_spin.setSuffix(" px)")
+        self.local_window_spin.setEnabled(self.settings.get('compute_local_vf', False))
+        local_vf_layout.addWidget(self.local_window_spin)
+        local_vf_layout.addStretch()
+
+        self.local_vf_check.toggled.connect(self.local_window_spin.setEnabled)
+
+        analysis_layout.addWidget(local_vf_widget)
+
+        layout.addWidget(analysis_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(ok_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+    def getSettings(self):
+        """Return the current settings."""
+        if self.otsu_radio.isChecked():
+            method = 'otsu'
+        elif self.insegt_radio.isChecked():
+            method = 'insegt'
+        else:
+            method = 'manual'
+
+        return {
+            'method': method,
+            'manual_threshold': self.threshold_spin.value(),
+            'invert': self.invert_check.isChecked(),
+            'min_size': self.min_size_spin.value(),
+            'closing_size': self.closing_spin.value(),
+            'compute_statistics': self.stats_check.isChecked(),
+            'compute_local_vf': self.local_vf_check.isChecked(),
+            'local_window_size': self.local_window_spin.value(),
+        }
+
+
+class CropOrientationDialog(QDialog):
+    """Dialog for Crop Orientation with void mask settings."""
+    def __init__(self, parent=None, void_available=False, orientation_available=False):
+        super().__init__(parent)
+        self.setWindowTitle("Crop Orientation with Void Mask")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        self.void_available = void_available
+        self.orientation_available = orientation_available
+
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Status info
+        status_group = QGroupBox("Data Status")
+        status_layout = QVBoxLayout(status_group)
+
+        orientation_status = QLabel(
+            "✓ Orientation data available" if self.orientation_available
+            else "✗ No orientation data (run orientation analysis first)"
+        )
+        orientation_status.setStyleSheet(
+            f"color: {'green' if self.orientation_available else COLORS['text_secondary']};"
+        )
+        status_layout.addWidget(orientation_status)
+
+        void_status = QLabel(
+            "✓ Void mask available" if self.void_available
+            else "✗ No void mask (run void analysis first)"
+        )
+        void_status.setStyleSheet(
+            f"color: {'green' if self.void_available else COLORS['text_secondary']};"
+        )
+        status_layout.addWidget(void_status)
+
+        layout.addWidget(status_group)
+
+        # Dilation settings
+        dilation_group = QGroupBox("Void Mask Dilation")
+        dilation_layout = QFormLayout(dilation_group)
+
+        dilation_desc = QLabel(
+            "Expand void regions to exclude orientation data near voids\n"
+            "where measurements may be unreliable."
+        )
+        dilation_desc.setWordWrap(True)
+        dilation_desc.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        dilation_layout.addRow(dilation_desc)
+
+        self.dilation_spin = QSpinBox()
+        self.dilation_spin.setRange(0, 50)
+        self.dilation_spin.setValue(3)
+        self.dilation_spin.setSuffix(" pixels")
+        self.dilation_spin.setToolTip(
+            "Number of pixels to expand void regions.\n"
+            "Set to 0 to use exact void boundaries."
+        )
+        dilation_layout.addRow("Dilation amount:", self.dilation_spin)
+
+        layout.addWidget(dilation_group)
+
+        # Output options
+        output_group = QGroupBox("Output Options")
+        output_layout = QVBoxLayout(output_group)
+
+        self.update_viewer_check = QCheckBox("Update viewer with masked orientation")
+        self.update_viewer_check.setChecked(True)
+        self.update_viewer_check.setToolTip("Apply masked orientation to the current viewer")
+        output_layout.addWidget(self.update_viewer_check)
+
+        self.export_check = QCheckBox("Export masked orientation to VTK file")
+        self.export_check.setChecked(False)
+        self.export_check.setToolTip("Save the masked orientation data to a VTK file")
+        output_layout.addWidget(self.export_check)
+
+        layout.addWidget(output_group)
+
+        layout.addStretch()
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.clicked.connect(self.accept)
+        self.apply_btn.setEnabled(self.void_available and self.orientation_available)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        button_layout.addStretch()
+        button_layout.addWidget(self.apply_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+    def getSettings(self):
+        """Return the current settings."""
+        return {
+            'dilation_pixels': self.dilation_spin.value(),
+            'update_viewer': self.update_viewer_check.isChecked(),
+            'export_vtk': self.export_check.isChecked(),
+        }
+
+
 class VfSettingsDialog(QDialog):
     """Dialog for Fiber Volume Fraction calculation settings."""
     def __init__(self, parent=None, settings=None):
@@ -9398,10 +10121,15 @@ class SimulationContentPanel(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
-        # Left panel - Material Parameters
+        # Left panel - Material Parameters (scrollable)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setMinimumWidth(280)
+        scroll_area.setMaximumWidth(350)
+        scroll_area.setStyleSheet("QScrollArea { border: none; }")
+
         left_panel = QWidget()
-        left_panel.setMinimumWidth(280)
-        left_panel.setMaximumWidth(350)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(10)
@@ -9550,7 +10278,8 @@ class SimulationContentPanel(QWidget):
         left_layout.addWidget(results_group)
         left_layout.addStretch()
 
-        layout.addWidget(left_panel)
+        scroll_area.setWidget(left_panel)
+        layout.addWidget(scroll_area)
 
         # Histogram Panel (initially hidden, shown when Histogram button is clicked)
         self.histogram_panel = HistogramPanel()
@@ -9751,10 +10480,15 @@ class VMMMainWindow(QMainWindow):
         # Create horizontal splitter for viewer and left slider panel
         self.content_splitter = QSplitter(Qt.Horizontal)
 
-        # Left slider panel (only sliders)
+        # Left slider panel (scrollable)
+        slider_scroll = QScrollArea()
+        slider_scroll.setWidgetResizable(True)
+        slider_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        slider_scroll.setMaximumWidth(250)
+        slider_scroll.setMinimumWidth(200)
+        slider_scroll.setStyleSheet("QScrollArea { border: none; }")
+
         slider_panel = QWidget()
-        slider_panel.setMaximumWidth(250)
-        slider_panel.setMinimumWidth(200)
         slider_layout = QVBoxLayout(slider_panel)
         slider_layout.setContentsMargins(10, 10, 10, 10)
 
@@ -9818,8 +10552,9 @@ class VMMMainWindow(QMainWindow):
 
         slider_layout.addStretch()
 
+        slider_scroll.setWidget(slider_panel)
         self.slider_panel = slider_panel  # Save reference for later use
-        self.content_splitter.addWidget(slider_panel)
+        self.content_splitter.addWidget(slider_scroll)
 
         # Histogram Panel (initially hidden)
         self.histogram_panel = HistogramPanel()
@@ -9843,41 +10578,11 @@ class VMMMainWindow(QMainWindow):
         # Connect viewer to main window for custom ranges
         self.viewer.main_window = self
 
-        # Add Void Analysis and Pipeline Panel to slider layout (before the stretch)
+        # Add Pipeline Panel to slider layout (before the stretch)
         # We need to insert it before the stretch, so remove stretch first, add controls, then re-add stretch
         slider_layout = slider_panel.layout()
         # Remove the last item (stretch)
         last_item = slider_layout.takeAt(slider_layout.count() - 1)
-
-        # Add Void Analysis group
-        void_group = QGroupBox("Void Analysis")
-        void_layout = QVBoxLayout(void_group)
-        void_layout.setSpacing(8)
-
-        # Threshold slider
-        threshold_label = QLabel("Threshold:")
-        void_layout.addWidget(threshold_label)
-
-        self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setMinimum(0)
-        self.threshold_slider.setMaximum(255)
-        self.threshold_slider.setValue(self.viewer.void_threshold)
-        self.threshold_slider.setTickPosition(QSlider.TicksBelow)
-        self.threshold_slider.setTickInterval(25)
-        self.threshold_slider.valueChanged.connect(self.onThresholdChanged)
-        void_layout.addWidget(self.threshold_slider)
-
-        # Threshold value display
-        self.threshold_value_label = QLabel(f"Value: {self.viewer.void_threshold}")
-        self.threshold_value_label.setAlignment(Qt.AlignCenter)
-        void_layout.addWidget(self.threshold_value_label)
-
-        # Reset button
-        reset_btn = QPushButton("Reset Threshold")
-        reset_btn.clicked.connect(self.onResetThreshold)
-        void_layout.addWidget(reset_btn)
-
-        slider_layout.addWidget(void_group)
 
         # Add Pipeline group
         pipeline_group = QGroupBox("Pipeline")
@@ -10066,10 +10771,6 @@ class VMMMainWindow(QMainWindow):
         self.histogram_btn.setEnabled(False)
         analysis_layout.addWidget(self.histogram_btn)
 
-        self.void_analysis_btn = RibbonButton("Void\nAnalysis")
-        self.void_analysis_btn.clicked.connect(self.computeVoidAnalysis)
-        analysis_layout.addWidget(self.void_analysis_btn)
-
         self.magnify_btn = RibbonButton("Magnify")
         self.magnify_btn.setCheckable(True)
         self.magnify_btn.clicked.connect(self.toggleMagnify)
@@ -10133,6 +10834,38 @@ class VMMMainWindow(QMainWindow):
         vf_layout_inner.addWidget(self.vf_compute_btn)
 
         layout.addWidget(vf_group)
+
+        # Void Analysis Group
+        void_group = QGroupBox("Void Analysis")
+        void_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        void_layout = QHBoxLayout(void_group)
+
+        self.void_settings_btn = RibbonButton("Void\nSettings")
+        self.void_settings_btn.clicked.connect(self.openVoidSettings)
+        void_layout.addWidget(self.void_settings_btn)
+
+        self.void_run_btn = RibbonButton("Analyze\nVoid")
+        self.void_run_btn.clicked.connect(self.runVoidAnalysis)
+        void_layout.addWidget(self.void_run_btn)
+
+        self.crop_orientation_btn = RibbonButton("Crop\nOrientation")
+        self.crop_orientation_btn.clicked.connect(self.cropOrientationWithVoid)
+        self.crop_orientation_btn.setToolTip("Mask orientation data with void regions")
+        void_layout.addWidget(self.crop_orientation_btn)
+
+        layout.addWidget(void_group)
+
+        # Reset Group
+        reset_group = QGroupBox("Reset")
+        reset_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
+        reset_layout = QHBoxLayout(reset_group)
+
+        self.reset_all_btn = RibbonButton("Reset\nAll")
+        self.reset_all_btn.clicked.connect(self.resetAllAnalysis)
+        self.reset_all_btn.setToolTip("Reset all analysis results (orientation, Vf, void, fiber detection)")
+        reset_layout.addWidget(self.reset_all_btn)
+
+        layout.addWidget(reset_group)
 
         # Export Group
         export_group = QGroupBox("Export")
@@ -10475,12 +11208,6 @@ class VMMMainWindow(QMainWindow):
         if hasattr(self, 'analysis_tab') and hasattr(self.analysis_tab, 'openHistogramDialog'):
             self.analysis_tab.openHistogramDialog()
 
-    def computeVoidAnalysis(self):
-        if hasattr(self, 'analysis_tab') and hasattr(self.analysis_tab, 'computeVoidAnalysis'):
-            if self.viewer and self.analysis_tab.viewer != self.viewer:
-                self.analysis_tab.viewer = self.viewer
-            self.analysis_tab.computeVoidAnalysis()
-
     def toggleMagnify(self, checked):
         if hasattr(self, 'analysis_tab') and hasattr(self.analysis_tab, 'toggleMagnify'):
             if self.viewer and self.analysis_tab.viewer != self.viewer:
@@ -10584,20 +11311,150 @@ class VMMMainWindow(QMainWindow):
         if hasattr(self, 'analysis_tab') and hasattr(self.analysis_tab, 'exportVfMapToVTK'):
             self.analysis_tab.exportVfMapToVTK()
 
+    def openVoidSettings(self):
+        """Open void analysis settings dialog."""
+        if hasattr(self, 'analysis_tab') and hasattr(self.analysis_tab, 'openVoidSettings'):
+            self.analysis_tab.openVoidSettings()
+
+    def runVoidAnalysis(self):
+        """Run void analysis."""
+        if hasattr(self, 'analysis_tab') and hasattr(self.analysis_tab, 'runVoidAnalysis'):
+            self.analysis_tab.runVoidAnalysis()
+
+    def cropOrientationWithVoid(self):
+        """Crop orientation data with void mask."""
+        if hasattr(self, 'analysis_tab') and hasattr(self.analysis_tab, 'cropOrientationWithVoid'):
+            self.analysis_tab.cropOrientationWithVoid()
+
+    def resetAllAnalysis(self):
+        """Reset all analysis results."""
+        # Confirm with user
+        reply = QMessageBox.question(
+            self, "Reset All Analysis",
+            "This will reset all analysis results including:\n\n"
+            "• Orientation data (theta, phi, angle)\n"
+            "• Fiber volume fraction (Vf) maps\n"
+            "• Void analysis results\n"
+            "• Fiber detection results\n"
+            "• ROI orientation data\n"
+            "• InSegt segmentation\n\n"
+            "Are you sure you want to continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+
+            # Reset orientation data in main window
+            self.orientation_data = None
+            if hasattr(self, 'orientation_theta'):
+                self.orientation_theta = None
+            if hasattr(self, 'orientation_phi'):
+                self.orientation_phi = None
+
+            # Reset viewer data
+            if hasattr(self, 'viewer') and self.viewer:
+                # Reset orientation overlays
+                self.viewer.base_volume = None
+                self.viewer.overlay_volume = None
+
+                # Reset ROI orientation data
+                if hasattr(self.viewer, 'rois'):
+                    for roi_name, roi_data in self.viewer.rois.items():
+                        roi_data['theta'] = None
+                        roi_data['phi'] = None
+                        roi_data['angle'] = None
+
+                # Reset Vf data
+                self.viewer.vf_map = None
+                self.viewer.vf_roi_bounds = None
+                self.viewer.show_vf_overlay = False
+
+                # Reset void data
+                self.viewer.void_mask = None
+                self.viewer.void_roi_bounds = None
+                self.viewer.show_void_overlay = False
+
+                # Reset fiber detection
+                self.viewer.show_fiber_detection = False
+
+                # Clear orientation ROI widgets
+                if hasattr(self.viewer, 'orientation_roi_widgets'):
+                    self.viewer.orientation_roi_widgets.clear()
+
+                # Re-render
+                self.viewer.renderVolume()
+
+            # Reset analysis tab data
+            if hasattr(self, 'analysis_tab') and self.analysis_tab:
+                # Reset segmentation
+                self.analysis_tab.segmentation_volume = None
+                self.analysis_tab.segmentation_roi_bounds = None
+                self.analysis_tab.segmentation_polygon_mask = None
+
+                # Reset Vf data
+                self.analysis_tab.vf_map = None
+                self.analysis_tab.vf_segmentation = None
+                self.analysis_tab.vf_stats = None
+                self.analysis_tab.vf_roi_bounds = None
+                self.analysis_tab.vf_polygon_mask = None
+
+                # Reset void data
+                self.analysis_tab.void_mask = None
+                self.analysis_tab.void_statistics = None
+                self.analysis_tab.void_local_fraction = None
+
+                # Reset InSegt model
+                if hasattr(self.analysis_tab, '_insegt_model'):
+                    self.analysis_tab._insegt_model = None
+                if hasattr(self.analysis_tab, 'insegt_model'):
+                    self.analysis_tab.insegt_model = None
+
+                # Reset fiber detection settings to defaults
+                self.analysis_tab.fiber_detection_settings = {
+                    'min_diameter': 5,
+                    'max_diameter': 20,
+                    'min_distance': 8,
+                    'threshold_rel': 0.3
+                }
+
+            # Reset export buttons
+            if hasattr(self, 'export_orientation_btn'):
+                self.export_orientation_btn.setEnabled(False)
+            if hasattr(self, 'export_vf_btn'):
+                self.export_vf_btn.setEnabled(False)
+
+            # Remove dynamic toggles from pipeline panel
+            if hasattr(self, '_vf_toggle_added'):
+                self._vf_toggle_added = False
+            if hasattr(self, '_void_toggle_added'):
+                self._void_toggle_added = False
+
+            QApplication.restoreOverrideCursor()
+
+            # Update status
+            self.status_label.setText("All analysis results have been reset.")
+
+            QMessageBox.information(
+                self, "Reset Complete",
+                "All analysis results have been reset.\n\n"
+                "You can now run new analysis on your data."
+            )
+
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Failed to reset analysis: {str(e)}")
+
     def updateNoiseScale(self):
         """Update noise scale value for analysis"""
         value = self.noise_scale_slider.value()
         self.noise_scale_label.setText(str(value))
-
-    def onThresholdChanged(self, value):
-        """Handle threshold slider change - only update label"""
-        self.threshold_value_label.setText(f"Value: {value}")
-
-    def onResetThreshold(self):
-        """Reset threshold to default value"""
-        default_threshold = 50
-        self.threshold_slider.setValue(default_threshold)
-        # valueChanged signal will trigger onThresholdChanged
 
     def addVfToggle(self):
         """Add Vf overlay toggle to the pipeline panel."""
@@ -10648,6 +11505,57 @@ class VMMMainWindow(QMainWindow):
                 self.viewer.show_vf_overlay = (state == 2)  # Qt.Checked = 2
             else:
                 self.viewer.show_vf_overlay = (state == Qt.CheckState.Checked)
+            self.viewer.renderVolume()
+
+    def addVoidToggle(self):
+        """Add Void overlay toggle to the pipeline panel."""
+        # Check if already added
+        if hasattr(self, '_void_toggle_added') and self._void_toggle_added:
+            return
+
+        # Get slider layout from slider_panel
+        if not hasattr(self, 'slider_panel'):
+            return
+        slider_layout = self.slider_panel.layout()
+
+        # Find the pipeline group
+        pipeline_group = None
+        for i in range(slider_layout.count()):
+            item = slider_layout.itemAt(i)
+            if item and item.widget():
+                widget = item.widget()
+                if isinstance(widget, QGroupBox) and widget.title() == "Pipeline":
+                    pipeline_group = widget
+                    break
+
+        if pipeline_group is None:
+            return
+
+        # Create Void toggle widget
+        void_widget = QWidget()
+        void_layout = QHBoxLayout(void_widget)
+        void_layout.setContentsMargins(0, 0, 0, 0)
+        void_layout.setSpacing(5)
+
+        self.void_check = QCheckBox("Void Overlay")
+        self.void_check.setChecked(True)
+        self.void_check.stateChanged.connect(self._onVoidToggleChanged)
+        void_layout.addWidget(self.void_check)
+
+        void_layout.addStretch()
+
+        # Add to pipeline group layout
+        pipeline_group.layout().addWidget(void_widget)
+        self._void_toggle_added = True
+
+    def _onVoidToggleChanged(self, state):
+        """Handle Void overlay toggle change."""
+        if self.viewer:
+            # Handle both Qt.CheckState enum and int values
+            if isinstance(state, int):
+                self.viewer.show_void_overlay = (state == 2)  # Qt.Checked = 2
+            else:
+                self.viewer.show_void_overlay = (state == Qt.CheckState.Checked)
             self.viewer.renderVolume()
 
     def onTabChanged(self, index):

@@ -8,7 +8,7 @@ A two-panel layout annotator for fiber segmentation:
 - Left panel: Original image with annotation overlay
 - Right panel: Segmentation result
 
-Colors: Cyan (fiber) and Magenta (background)
+Colors: Cyan (fiber), Magenta (matrix/background), Yellow (void)
 """
 
 import numpy as np
@@ -18,15 +18,16 @@ import PIL.Image
 
 class DualPanelAnnotator(QtWidgets.QWidget):
     """
-    Two-panel annotator with cyan/magenta colors.
+    Two-panel annotator with cyan/magenta/yellow colors.
     Left: image + annotations, Right: segmentation result
     """
 
-    # Colors: Cyan for fiber (label 1), Magenta for background (label 2)
+    # Colors: Cyan for fiber (label 1), Magenta for matrix (label 2), Yellow for void (label 3)
     colors = np.array([
         [0, 0, 0],        # 0: transparent/eraser
         [0, 255, 255],    # 1: Cyan (fiber)
-        [255, 0, 255],    # 2: Magenta (background)
+        [255, 0, 255],    # 2: Magenta (matrix/background)
+        [255, 255, 0],    # 3: Yellow (void)
     ], dtype=np.uint8)
 
     def __init__(self, image, model):
@@ -90,7 +91,7 @@ class DualPanelAnnotator(QtWidgets.QWidget):
 
     def _setupUI(self):
         """Setup the UI layout."""
-        self.setWindowTitle("InSegt Fiber Labeling - Cyan=Fiber, Magenta=Background")
+        self.setWindowTitle("InSegt Fiber Labeling - Cyan=Fiber, Magenta=Matrix, Yellow=Void")
 
         # Calculate initial window size
         screen = QtWidgets.QApplication.primaryScreen().geometry()
@@ -99,7 +100,7 @@ class DualPanelAnnotator(QtWidgets.QWidget):
 
         # Two panels side by side with some spacing
         panel_width = min(self.img_width, (max_width - 20) // 2)
-        panel_height = min(self.img_height, max_height - 50)
+        panel_height = min(self.img_height, max_height - 60)
 
         # Keep aspect ratio
         scale_w = panel_width / self.img_width
@@ -110,7 +111,7 @@ class DualPanelAnnotator(QtWidgets.QWidget):
         self.panel_height = int(self.img_height * scale)
 
         total_width = self.panel_width * 2 + 20  # 20px gap
-        total_height = self.panel_height + 30  # Status bar
+        total_height = self.panel_height + 45  # Status bar (2 lines)
 
         self.resize(total_width, total_height)
         self.setMinimumSize(400, 200)
@@ -122,8 +123,9 @@ class DualPanelAnnotator(QtWidgets.QWidget):
 
         # Calculate panel positions
         gap = 10
+        status_bar_height = 40  # Increased for two lines
         panel_w = (self.width() - gap) // 2
-        panel_h = self.height() - 25
+        panel_h = self.height() - status_bar_height
 
         # Left panel target rect
         left_target = QtCore.QRect(0, 0, panel_w, panel_h)
@@ -145,29 +147,59 @@ class DualPanelAnnotator(QtWidgets.QWidget):
         painter.drawRect(left_target)
         painter.drawRect(right_target)
 
-        # Draw labels
-        painter.setPen(QtGui.QColor(200, 200, 200))
+        # Clear status bar area
+        painter.fillRect(0, panel_h, self.width(), status_bar_height, QtGui.QColor(30, 30, 30))
+
+        # Draw panel labels (first line)
+        painter.setPen(QtGui.QColor(180, 180, 180))
         font = painter.font()
         font.setPointSize(9)
         painter.setFont(font)
-        painter.drawText(5, self.height() - 8, "Image + Annotations")
-        painter.drawText(panel_w + gap + 5, self.height() - 8, "Segmentation Result")
+        painter.drawText(5, panel_h + 14, "Annotation Panel")
+        painter.drawText(panel_w + gap + 5, panel_h + 14, "Segmentation Result")
 
-        # Draw status
+        # Draw status info (second line)
         if self.label == 0:
-            label_str = "Eraser(0)"
+            label_str = "Eraser"
+            label_color = QtGui.QColor(128, 128, 128)
         elif self.label == 1:
-            label_str = "Fiber(1/Left)"
+            label_str = "Fiber"
+            label_color = QtGui.QColor(0, 255, 255)  # Cyan
+        elif self.label == 2:
+            label_str = "Matrix"
+            label_color = QtGui.QColor(255, 0, 255)  # Magenta
         else:
-            label_str = "Background(2/Right)"
-        status = f"Cursor: {label_str} | Pen: {self.penWidth} | Live: {'ON' if self.liveUpdate else 'OFF'}"
-        painter.drawText(self.width() // 2 - 120, self.height() - 8, status)
+            label_str = "Void"
+            label_color = QtGui.QColor(255, 255, 0)  # Yellow
+
+        # Draw current label with color indicator
+        painter.setPen(QtGui.QColor(120, 120, 120))
+        painter.drawText(5, panel_h + 32, "Label:")
+        painter.setPen(label_color)
+        painter.drawText(45, panel_h + 32, label_str)
+
+        # Draw pen size
+        painter.setPen(QtGui.QColor(120, 120, 120))
+        painter.drawText(110, panel_h + 32, f"Pen: {self.penWidth}")
+
+        # Draw live update status
+        live_color = QtGui.QColor(100, 255, 100) if self.liveUpdate else QtGui.QColor(255, 100, 100)
+        painter.drawText(180, panel_h + 32, "Live:")
+        painter.setPen(live_color)
+        painter.drawText(215, panel_h + 32, "ON" if self.liveUpdate else "OFF")
+
+        # Draw keyboard hints on right side
+        painter.setPen(QtGui.QColor(100, 100, 100))
+        font.setPointSize(8)
+        painter.setFont(font)
+        hints = "1:Fiber  2:Matrix  3:Void  0:Eraser  ↑↓:Pen  L:Live  H:Help"
+        painter.drawText(panel_w + gap + 5, panel_h + 32, hints)
 
     def _widgetToImage(self, pos):
         """Convert widget position to image coordinates."""
         gap = 10
         panel_w = (self.width() - gap) // 2
-        panel_h = self.height() - 25
+        panel_h = self.height() - 40  # Match status_bar_height
 
         # Check if in left panel
         if pos.x() < panel_w:
@@ -215,7 +247,7 @@ class DualPanelAnnotator(QtWidgets.QWidget):
             delta = event.pos() - self.lastPanPoint
             gap = 10
             panel_w = (self.width() - gap) // 2
-            panel_h = self.height() - 25
+            panel_h = self.height() - 40  # Match status_bar_height
 
             scale_x = self.source.width() / panel_w
             scale_y = self.source.height() / panel_h
@@ -284,10 +316,13 @@ class DualPanelAnnotator(QtWidgets.QWidget):
         key = event.key()
 
         if key == QtCore.Qt.Key_1:
-            self.label = 1
+            self.label = 1  # Fiber
             self.update()
         elif key == QtCore.Qt.Key_2:
-            self.label = 2
+            self.label = 2  # Matrix
+            self.update()
+        elif key == QtCore.Qt.Key_3:
+            self.label = 3  # Void
             self.update()
         elif key == QtCore.Qt.Key_0:
             self.label = 0  # Eraser
@@ -309,8 +344,8 @@ class DualPanelAnnotator(QtWidgets.QWidget):
             self.update()
         elif key == QtCore.Qt.Key_H:
             self._showHelp()
-        elif key in range(QtCore.Qt.Key_3, QtCore.Qt.Key_9 + 1):
-            # Ignore keys 3-9
+        elif key in range(QtCore.Qt.Key_4, QtCore.Qt.Key_9 + 1):
+            # Ignore keys 4-9
             pass
 
     def _drawPoint(self, pos, label=None):
@@ -447,14 +482,15 @@ class DualPanelAnnotator(QtWidgets.QWidget):
 InSegt Fiber Labeling Tool
 
 MOUSE:
-  Left-click + drag: Draw fiber (Cyan)
-  Right-click + drag: Draw background (Magenta)
+  Left-click + drag: Draw with current label
+  Right-click + drag: Draw matrix (Magenta)
   Middle-click + drag: Pan
   Scroll wheel: Zoom
 
 KEYBOARD:
   1: Select fiber label (Cyan)
-  2: Select background label (Magenta)
+  2: Select matrix label (Magenta)
+  3: Select void label (Yellow)
   0: Eraser mode
   ↑/↓: Increase/decrease pen width
   L: Toggle live update
