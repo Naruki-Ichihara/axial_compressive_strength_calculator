@@ -15,6 +15,7 @@ from PySide6.QtGui import QIcon, QPixmap
 import cv2 as cv
 from vmm.io import import_image_sequence, trim_image
 from vmm.analysis import compute_structure_tensor, compute_orientation, drop_edges_3D
+from vmm.adjustment import ImageAdjuster, AdjustmentSettings, export_adjustment_settings
 import matplotlib
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -380,79 +381,96 @@ class ImportWorker(QThread):
             self.error.emit(str(e))
 
 
-class ExportScreenshotDialog(QDialog):
-    """Dialog for configuring screenshot export settings."""
+class ExportVTPDialog(QDialog):
+    """Dialog for configuring VTP export options."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Export Screenshot")
-        self.setMinimumWidth(300)
+        self.setWindowTitle("Export VTP Options")
+        self.setMinimumWidth(380)
         self.initUI()
 
     def initUI(self):
         layout = QVBoxLayout(self)
 
-        # View selection
-        view_group = QGroupBox("Select View")
-        view_layout = QVBoxLayout(view_group)
+        # Scalar arrays to export
+        arrays_group = QGroupBox("Scalar Arrays")
+        arrays_layout = QVBoxLayout(arrays_group)
 
-        self.view_combo = QComboBox()
-        self.view_combo.addItems(["3D View", "XY Slice", "XZ Slice", "YZ Slice"])
-        self.view_combo.currentTextChanged.connect(self.onViewChanged)
-        view_layout.addWidget(self.view_combo)
+        self.xz_check = QCheckBox("XZ_Orientation (X-Z plane angle)")
+        self.xz_check.setChecked(True)
+        arrays_layout.addWidget(self.xz_check)
 
-        layout.addWidget(view_group)
+        self.yz_check = QCheckBox("YZ_Orientation (Y-Z plane angle)")
+        self.yz_check.setChecked(True)
+        arrays_layout.addWidget(self.yz_check)
 
-        # Background color
-        bg_group = QGroupBox("Background Color")
-        bg_layout = QVBoxLayout(bg_group)
+        self.fiber_id_check = QCheckBox("FiberID (unique fiber identifier)")
+        self.fiber_id_check.setChecked(True)
+        arrays_layout.addWidget(self.fiber_id_check)
 
-        self.bg_combo = QComboBox()
-        self.bg_combo.addItems(["White", "Transparent", "Gray"])
-        bg_layout.addWidget(self.bg_combo)
+        layout.addWidget(arrays_group)
 
-        layout.addWidget(bg_group)
+        # Azimuth options (cyclic colormap)
+        azimuth_group = QGroupBox("Azimuth (for cyclic colormap)")
+        azimuth_layout = QVBoxLayout(azimuth_group)
 
-        # CT overlay option (only for slice views)
-        self.ct_group = QGroupBox("Slice Options")
-        ct_layout = QVBoxLayout(self.ct_group)
+        self.azimuth_check = QCheckBox("Azimuth (0° to 360°, cyclic)")
+        self.azimuth_check.setChecked(True)
+        self.azimuth_check.setToolTip(
+            "True azimuth angle in 0°-360° range.\n"
+            "Use with HSV or cyclic colormap in Paraview.\n"
+            "0°/360° = same direction (cyclic)"
+        )
+        azimuth_layout.addWidget(self.azimuth_check)
 
-        self.include_ct_check = QCheckBox("Include CT Image Overlay")
-        self.include_ct_check.setChecked(True)
-        ct_layout.addWidget(self.include_ct_check)
+        self.azimuth_norm_check = QCheckBox("Azimuth_Normalized (0 to 1, for Hue)")
+        self.azimuth_norm_check.setChecked(True)
+        self.azimuth_norm_check.setToolTip(
+            "Azimuth normalized to 0-1 range.\n"
+            "Use directly as Hue in HSV colormap:\n"
+            "  0° → 0.0 (Red)\n"
+            "  120° → 0.33 (Green)\n"
+            "  240° → 0.67 (Blue)\n"
+            "  360° → 1.0 (Red, cyclic)"
+        )
+        azimuth_layout.addWidget(self.azimuth_norm_check)
 
-        layout.addWidget(self.ct_group)
+        layout.addWidget(azimuth_group)
 
-        # Resolution selection
-        res_group = QGroupBox("Resolution")
-        res_layout = QVBoxLayout(res_group)
+        # HSV to RGB color options
+        rgb_group = QGroupBox("Pre-rendered RGB Color")
+        rgb_layout = QVBoxLayout(rgb_group)
 
-        self.resolution_combo = QComboBox()
-        self.resolution_combo.addItems([
-            "Current View",
-            "800 x 600",
-            "1024 x 768",
-            "1280 x 960",
-            "1600 x 1200",
-            "1920 x 1440",
-            "2560 x 1920",
-            "3840 x 2880"
-        ])
-        self.resolution_combo.setCurrentIndex(0)  # Default: Current View
-        res_layout.addWidget(self.resolution_combo)
+        self.rgb_check = QCheckBox("Azimuth_RGB (HSV→RGB converted color)")
+        self.rgb_check.setChecked(True)
+        self.rgb_check.setToolTip(
+            "Pre-computed RGB color from HSV:\n"
+            "  H = Azimuth (0°-360° → color wheel)\n"
+            "  S = Tilt angle (Z-axis deviation)\n"
+            "  V = 1.0 (full brightness)\n\n"
+            "Use directly in Paraview without colormap setup."
+        )
+        rgb_layout.addWidget(self.rgb_check)
 
-        layout.addWidget(res_group)
+        layout.addWidget(rgb_group)
 
-        # Legend options
-        legend_group = QGroupBox("Legend")
-        legend_layout = QVBoxLayout(legend_group)
-
-        self.include_legend_check = QCheckBox("Include Color Legend")
-        self.include_legend_check.setChecked(True)
-        self.include_legend_check.setToolTip("Include color wheel (azimuth mode) or colorbar (tilt mode)")
-        legend_layout.addWidget(self.include_legend_check)
-
-        layout.addWidget(legend_group)
+        # Usage info
+        info_group = QGroupBox("Usage in Paraview")
+        info_layout = QVBoxLayout(info_group)
+        info_label = QLabel(
+            "For pre-rendered RGB color:\n"
+            "1. Open VTP → Apply 'Tube' filter\n"
+            "2. Color by 'Azimuth_RGB'\n"
+            "3. Turn off 'Map Scalars'\n\n"
+            "HSV mapping:\n"
+            "  Hue = Azimuth direction\n"
+            "  Saturation = Tilt magnitude"
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #888; font-size: 11px;")
+        info_layout.addWidget(info_label)
+        layout.addWidget(info_group)
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -467,31 +485,15 @@ class ExportScreenshotDialog(QDialog):
 
         layout.addLayout(button_layout)
 
-        # Initial state
-        self.onViewChanged(self.view_combo.currentText())
-
-    def onViewChanged(self, view):
-        """Enable/disable CT overlay option based on view selection."""
-        is_slice = view != "3D View"
-        self.ct_group.setEnabled(is_slice)
-        if not is_slice:
-            self.include_ct_check.setChecked(False)
-
     def getSettings(self):
         """Return the current dialog settings."""
-        # Parse resolution string (e.g., "1280 x 960" -> (1280, 960))
-        res_text = self.resolution_combo.currentText()
-        if res_text == "Current View":
-            resolution = None  # Use current view size
-        else:
-            width, height = map(int, res_text.replace(" ", "").split("x"))
-            resolution = (width, height)
         return {
-            'view': self.view_combo.currentText(),
-            'background': self.bg_combo.currentText(),
-            'include_ct': self.include_ct_check.isChecked(),
-            'resolution': resolution,
-            'include_legend': self.include_legend_check.isChecked()
+            'export_xz': self.xz_check.isChecked(),
+            'export_yz': self.yz_check.isChecked(),
+            'export_azimuth': self.azimuth_check.isChecked(),
+            'export_azimuth_norm': self.azimuth_norm_check.isChecked(),
+            'export_fiber_id': self.fiber_id_check.isChecked(),
+            'export_rgb': self.rgb_check.isChecked()
         }
 
 
@@ -1531,6 +1533,9 @@ class Viewer2D(QWidget):
         self.void_roi_bounds = None
         self.show_void_overlay = False
 
+        # Image adjustment
+        self.adjuster = ImageAdjuster()
+
         self.initUI()
 
     def initUI(self):
@@ -1655,7 +1660,9 @@ class Viewer2D(QWidget):
         self.base_volume = None
         self.overlay_volume = None
 
+        # Store original volume for adjustment
         if volume is not None:
+            self.adjuster.set_original_volume(volume)
             # Initialize slice positions to center of volume
             if len(volume.shape) == 3:
                 self.slice_z = volume.shape[0] // 2
@@ -3017,6 +3024,9 @@ class Viewer2D(QWidget):
 
             # Render XY plane (Z slice)
             slice_xy = volume[self.slice_z, :, :]
+            # Apply image adjustments if any
+            if not self.adjuster.settings.is_default():
+                slice_xy = self.adjuster.apply_to_slice(slice_xy)
             im_xy = self.ax_xy.imshow(slice_xy, cmap=self.colormap, origin='lower',
                                        vmin=vmin, vmax=vmax, aspect='equal')
             self._setSquareAspect(self.ax_xy, slice_xy.shape)
@@ -3035,6 +3045,9 @@ class Viewer2D(QWidget):
 
             # Render XZ plane (Y slice)
             slice_xz = volume[:, self.slice_y, :]
+            # Apply image adjustments if any
+            if not self.adjuster.settings.is_default():
+                slice_xz = self.adjuster.apply_to_slice(slice_xz)
             im_xz = self.ax_xz.imshow(slice_xz, cmap=self.colormap, origin='lower',
                                        vmin=vmin, vmax=vmax, aspect='equal')
             self._setSquareAspect(self.ax_xz, slice_xz.shape)
@@ -3046,6 +3059,9 @@ class Viewer2D(QWidget):
 
             # Render YZ plane (X slice)
             slice_yz = volume[:, :, self.slice_x]
+            # Apply image adjustments if any
+            if not self.adjuster.settings.is_default():
+                slice_yz = self.adjuster.apply_to_slice(slice_yz)
             im_yz = self.ax_yz.imshow(slice_yz, cmap=self.colormap, origin='lower',
                                        vmin=vmin, vmax=vmax, aspect='equal')
             self._setSquareAspect(self.ax_yz, slice_yz.shape)
@@ -3305,40 +3321,6 @@ class Viewer2D(QWidget):
         if self.current_volume is not None:
             self.renderVolume()
 
-    def screenshot(self, filename):
-        """Save current view as image - saves all three slice views"""
-        if self.current_volume is not None:
-            # Create a combined figure with all three views
-            import matplotlib.pyplot as plt
-            from matplotlib.gridspec import GridSpec
-
-            fig = plt.figure(figsize=(15, 5))
-            gs = GridSpec(1, 3, figure=fig)
-
-            # Copy XY view
-            ax1 = fig.add_subplot(gs[0, 0])
-            ax1.imshow(self.current_volume[self.slice_z, :, :], cmap=self.colormap, origin='lower')
-            ax1.set_title(f'XY Plane (Z={self.slice_z})', fontweight='bold')
-            ax1.axis('off')
-
-            # Copy XZ view
-            ax2 = fig.add_subplot(gs[0, 1])
-            ax2.imshow(self.current_volume[:, self.slice_y, :], cmap=self.colormap, origin='lower')
-            ax2.set_title(f'XZ Plane (Y={self.slice_y})', fontweight='bold')
-            ax2.axis('off')
-
-            # Copy YZ view
-            ax3 = fig.add_subplot(gs[0, 2])
-            ax3.imshow(self.current_volume[:, :, self.slice_x], cmap=self.colormap, origin='lower')
-            ax3.set_title(f'YZ Plane (X={self.slice_x})', fontweight='bold')
-            ax3.axis('off')
-
-            fig.tight_layout()
-            fig.savefig(filename, dpi=150, bbox_inches='tight')
-            plt.close(fig)
-
-            QMessageBox.information(None, "Success", f"Screenshot saved to {filename}")
-
     def export3D(self, filename, iso_value):
         """Export functionality removed - 2D viewer only"""
         QMessageBox.warning(None, "Not Available",
@@ -3407,20 +3389,6 @@ class VolumeTab(QWidget):
         if self.viewer:
             self.viewer.resetCamera()
 
-    def takeScreenshot(self):
-        if self.viewer:
-            filename, _ = QFileDialog.getSaveFileName(
-                self, "Save Screenshot", "", "PNG Files (*.png);;All Files (*)"
-            )
-            if filename:
-                self.viewer.screenshot(filename)
-                msg = QMessageBox(self)
-                msg.setWindowTitle("Success")
-                msg.setText(f"Screenshot saved to {filename}")
-                msg.setIcon(QMessageBox.Information)
-                msg.move(self.geometry().center() - msg.rect().center())
-                msg.exec_()
-
     def export3D(self):
         """Export CT volume to VTK format for Paraview."""
         import pyvista as pv
@@ -3442,13 +3410,17 @@ class VolumeTab(QWidget):
         try:
             volume = self.viewer.current_volume
 
+            # Transpose from (Z, Y, X) to (X, Y, Z) for VTK coordinate system
+            # This matches the fiber trajectory VTP export coordinate system
+            volume_vtk = np.transpose(volume, (2, 1, 0))
+
             # Create VTK ImageData
             grid = pv.ImageData()
-            grid.dimensions = np.array(volume.shape) + 1
+            grid.dimensions = np.array(volume_vtk.shape) + 1  # (X+1, Y+1, Z+1)
             grid.spacing = (1, 1, 1)
 
-            # Add volume data as cell data
-            grid.cell_data['CTValue'] = volume.flatten(order='F')
+            # Add volume data as cell data (Fortran order for VTK)
+            grid.cell_data['CTValue'] = volume_vtk.flatten(order='F')
 
             grid.save(filename)
 
@@ -3594,12 +3566,13 @@ class VisualizationTab(QWidget):
 
         colormap_layout.addWidget(QLabel("Color Mode:"))
         self.color_mode_combo = QComboBox()
-        self.color_mode_combo.addItems(["X-Z Orientation", "Y-Z Orientation", "Azimuth"])
+        self.color_mode_combo.addItems(["X-Z Orientation", "Y-Z Orientation", "Azimuth", "Azimuth (saturation)"])
         self.color_mode_combo.currentTextChanged.connect(self.updateVisualization)
         self.color_mode_combo.setToolTip(
             "X-Z: Angle in X-Z plane (projection)\n"
             "Y-Z: Angle in Y-Z plane (projection)\n"
-            "Azimuth: True azimuth direction in XY plane (-180° to 180°)"
+            "Azimuth: True azimuth (0°-360°, uniform saturation)\n"
+            "Azimuth (saturation): Azimuth with tilt-based saturation"
         )
         colormap_layout.addWidget(self.color_mode_combo)
 
@@ -4305,8 +4278,6 @@ class VisualizationTab(QWidget):
 
         # Enable export buttons in MainWindow's ribbon
         if self.main_window:
-            if hasattr(self.main_window, 'export_screenshot_btn'):
-                self.main_window.export_screenshot_btn.setEnabled(True)
             if hasattr(self.main_window, 'export_traj_vtk_btn'):
                 self.main_window.export_traj_vtk_btn.setEnabled(True)
             if hasattr(self.main_window, 'trajectory_histogram_btn'):
@@ -4434,17 +4405,19 @@ class VisualizationTab(QWidget):
         # Determine which angle data to use based on color mode
         # "X-Z Orientation" -> use angles (X-Z projection)
         # "Y-Z Orientation" -> use azimuths (Y-Z projection)
-        # "Azimuth" -> use azimuth_angles (true azimuth -180 to 180)
+        # "Azimuth" -> use azimuth_angles (true azimuth, uniform saturation)
+        # "Azimuth (saturation)" -> use azimuth_angles with tilt-based saturation
         use_xz = "X-Z" in color_mode
         use_yz = "Y-Z" in color_mode
-        use_true_azimuth = color_mode == "Azimuth"
+        use_true_azimuth = "Azimuth" in color_mode
+        use_tilt_saturation = color_mode == "Azimuth (saturation)"
 
         # Set appropriate angle range based on color mode
-        # Azimuth uses HSV mapping internally (-180 to 180), no clim needed
+        # Azimuth uses HSV cyclic colormap (0-360)
         # X-Z/Y-Z Orientation use linear colormap with user settings or defaults
         if use_true_azimuth:
-            angle_min = -180.0
-            angle_max = 180.0
+            angle_min = 0.0
+            angle_max = 360.0
         else:
             # Use user settings for X-Z/Y-Z orientation
             angle_min = self.trajectory_settings['tilt_min']
@@ -4657,17 +4630,45 @@ class VisualizationTab(QWidget):
             )
         elif color_by_angle:
             if use_true_azimuth and all_azimuth_angles_data:
-                # True azimuth mode: use linear colormap (-180 to 180)
-                poly['angle'] = np.array(all_azimuth_angles_data)
-                self.plotter_3d.add_mesh(
-                    poly,
-                    scalars='angle',
-                    cmap=cmap,
-                    clim=(angle_min, angle_max),
-                    line_width=line_width,
-                    render_lines_as_tubes=True,
-                    scalar_bar_args={'title': 'Azimuth (°)', 'n_labels': 5}
-                )
+                from matplotlib.colors import hsv_to_rgb
+                # True azimuth mode: convert -180~180 to 0~360 for cyclic colormap
+                azimuth_arr = np.array(all_azimuth_angles_data)
+                azimuth_360 = np.where(azimuth_arr < 0, azimuth_arr + 360, azimuth_arr)
+
+                if use_tilt_saturation:
+                    # Use tilt-based saturation with RGB colors
+                    tilt_arr = np.array(all_angles_data)
+                    sat_min = self.trajectory_settings.get('saturation_min', 0.0)
+                    sat_max = self.trajectory_settings.get('saturation_max', 45.0)
+                    sat_range = sat_max - sat_min if sat_max > sat_min else 1.0
+                    saturation = np.clip((np.abs(tilt_arr) - sat_min) / sat_range, 0, 1)
+                    # Build HSV and convert to RGB
+                    n_pts = len(azimuth_360)
+                    hsv = np.zeros((n_pts, 3))
+                    hsv[:, 0] = azimuth_360 / 360.0
+                    hsv[:, 1] = saturation
+                    hsv[:, 2] = 1.0
+                    rgb = hsv_to_rgb(hsv)
+                    poly['rgb'] = (rgb * 255).astype(np.uint8)
+                    self.plotter_3d.add_mesh(
+                        poly,
+                        scalars='rgb',
+                        rgb=True,
+                        line_width=line_width,
+                        render_lines_as_tubes=True
+                    )
+                else:
+                    # Uniform saturation - use HSV colormap directly
+                    poly['angle'] = azimuth_360
+                    self.plotter_3d.add_mesh(
+                        poly,
+                        scalars='angle',
+                        cmap='hsv',
+                        clim=(angle_min, angle_max),
+                        line_width=line_width,
+                        render_lines_as_tubes=True,
+                        scalar_bar_args={'title': 'Azimuth (°)', 'n_labels': 5}
+                    )
             elif use_yz and all_azimuths_data:
                 # Y-Z orientation mode: use linear colormap
                 poly['angle'] = np.array(all_azimuths_data)
@@ -4766,15 +4767,18 @@ class VisualizationTab(QWidget):
         # Determine which angle data to use based on color mode
         # "X-Z Orientation" -> use angles (X-Z projection)
         # "Y-Z Orientation" -> use azimuths (Y-Z projection)
-        # "Azimuth" -> use azimuth_angles (true azimuth -180 to 180)
+        # "Azimuth" -> use azimuth_angles (true azimuth, uniform saturation)
+        # "Azimuth (saturation)" -> use azimuth_angles with tilt-based saturation
         use_xz = "X-Z" in color_mode
         use_yz = "Y-Z" in color_mode
-        use_true_azimuth = color_mode == "Azimuth"
+        use_true_azimuth = "Azimuth" in color_mode
+        use_tilt_saturation = color_mode == "Azimuth (saturation)"
 
         # Set appropriate angle range based on color mode
+        # Azimuth uses HSV cyclic colormap (0-360)
         if use_true_azimuth:
-            angle_min = -180.0
-            angle_max = 180.0
+            angle_min = 0.0
+            angle_max = 360.0
         else:
             angle_min = self.trajectory_settings['tilt_min']
             angle_max = self.trajectory_settings['tilt_max']
@@ -4819,8 +4823,9 @@ class VisualizationTab(QWidget):
             norm_angles = np.clip((azimuths_arr - angle_min) / (angle_max - angle_min + 1e-6), 0, 1)
             return cmap(norm_angles)
 
-        # Vectorized color computation for true azimuth (linear colormap, -180 to 180)
+        # Vectorized color computation for true azimuth (HSV cyclic colormap, 0-360)
         def true_azimuth_to_colors(azimuth_angles_arr, tilts_arr, fiber_indices=None):
+            from matplotlib.colors import hsv_to_rgb
             if color_by_fiber and fiber_indices is not None:
                 n_fibers = len(fiber_indices)
                 colors = np.zeros((n_fibers, 4))
@@ -4829,9 +4834,26 @@ class VisualizationTab(QWidget):
                 return colors
             if not color_by_angle:
                 return np.full((len(azimuth_angles_arr), 4), [0, 0, 1, 1])  # blue
-            # Use linear colormap for azimuth (-180 to 180)
-            norm_angles = np.clip((azimuth_angles_arr - angle_min) / (angle_max - angle_min + 1e-6), 0, 1)
-            colors = cmap(norm_angles)
+            # Convert -180~180 to 0~360 for cyclic colormap
+            azimuth_360 = np.where(azimuth_angles_arr < 0, azimuth_angles_arr + 360, azimuth_angles_arr)
+            # Saturation: uniform or tilt-based
+            if use_tilt_saturation:
+                sat_min = self.trajectory_settings.get('saturation_min', 0.0)
+                sat_max = self.trajectory_settings.get('saturation_max', 45.0)
+                sat_range = sat_max - sat_min if sat_max > sat_min else 1.0
+                saturation = np.clip((np.abs(tilts_arr) - sat_min) / sat_range, 0, 1)
+            else:
+                saturation = np.ones(len(azimuth_360))  # Uniform saturation
+            # Build HSV array
+            n_points = len(azimuth_360)
+            hsv = np.zeros((n_points, 3))
+            hsv[:, 0] = azimuth_360 / 360.0  # Hue
+            hsv[:, 1] = saturation            # Saturation
+            hsv[:, 2] = 1.0                   # Value
+            rgb = hsv_to_rgb(hsv)
+            # Add alpha channel
+            colors = np.ones((n_points, 4))
+            colors[:, :3] = rgb
             return colors
 
         # Get global bounds from main window volume if available
@@ -4984,6 +5006,25 @@ class VisualizationTab(QWidget):
                 fiber_diameter = getattr(fiber_traj, 'fiber_diameter', 7.0)
                 radius = fiber_diameter / 2.0
 
+                # Helper function to get angle data with proper padding for resampled fibers
+                def get_padded_angles_roi(angle_arr, slice_idx, n_pts):
+                    if slice_idx < len(angle_arr):
+                        arr = np.array(angle_arr[slice_idx])
+                        if len(arr) == n_pts:
+                            return arr
+                        elif len(arr) < n_pts:
+                            # Pad with zeros for new fibers added by resampling
+                            return np.concatenate([arr, np.zeros(n_pts - len(arr))])
+                        else:
+                            # Truncate if somehow longer
+                            return arr[:n_pts]
+                    return np.zeros(n_pts)
+
+                # Helper function for masked angle access
+                def get_slice_angles_masked_roi(angle_arr, slice_idx, n_pts, mask):
+                    padded = get_padded_angles_roi(angle_arr, slice_idx, n_pts)
+                    return padded[mask]
+
                 # XY Slice - find trajectory slice at z_pos (relative to ROI)
                 roi_z_pos = z_pos - z_offset
                 num_slices = len(trajectories)
@@ -4991,23 +5032,18 @@ class VisualizationTab(QWidget):
                 if 0 <= roi_z_pos < num_slices:
                     z, points = trajectories[roi_z_pos]
                     n_points = len(points)
-                    # Ensure angles array has correct length (may differ when new fibers are added dynamically)
-                    if roi_z_pos < len(angles) and len(angles[roi_z_pos]) == n_points:
-                        slice_angles = np.array(angles[roi_z_pos])
-                    else:
-                        slice_angles = np.zeros(n_points)
+
+                    slice_angles = get_padded_angles_roi(angles, roi_z_pos, n_points)
                     fiber_indices = np.arange(n_points)  # fiber index for each point
-                    # Ensure azimuths array has correct length for Y-Z or true azimuth mode
+
+                    # Get azimuths for Y-Z or true azimuth mode
                     if use_yz or use_true_azimuth:
-                        if roi_z_pos < len(azimuths) and len(azimuths[roi_z_pos]) == n_points:
-                            slice_azimuths = np.array(azimuths[roi_z_pos])
-                        else:
-                            slice_azimuths = np.zeros(n_points)
+                        slice_azimuths = get_padded_angles_roi(azimuths, roi_z_pos, n_points)
                         if use_true_azimuth:
                             # Get true azimuth angles if available
-                            azimuth_angles = getattr(fiber_traj, 'azimuth_angles', None)
-                            if azimuth_angles and roi_z_pos < len(azimuth_angles) and len(azimuth_angles[roi_z_pos]) == n_points:
-                                slice_azimuth_angles = np.array(azimuth_angles[roi_z_pos])
+                            azimuth_angles_data = getattr(fiber_traj, 'azimuth_angles', None)
+                            if azimuth_angles_data:
+                                slice_azimuth_angles = get_padded_angles_roi(azimuth_angles_data, roi_z_pos, n_points)
                             else:
                                 slice_azimuth_angles = slice_azimuths  # fallback to azimuths
                             colors = true_azimuth_to_colors(slice_azimuth_angles, slice_angles, fiber_indices)
@@ -5034,20 +5070,15 @@ class VisualizationTab(QWidget):
                         if np.any(mask):
                             matched_indices = np.where(mask)[0]
                             n_matched = len(matched_indices)
+                            n_pts = len(points)
                             xz_x_all.extend(points[mask, 0] + x_offset)
                             xz_z_all.extend(np.full(n_matched, slice_idx + z_offset))
-                            # Ensure angles array has correct length
-                            if slice_idx < len(angles) and len(angles[slice_idx]) == len(points):
-                                xz_angles_all.extend(np.array(angles[slice_idx])[mask])
-                            else:
-                                xz_angles_all.extend(np.zeros(n_matched))
+                            # Get angles with proper padding for resampled fibers
+                            xz_angles_all.extend(get_slice_angles_masked_roi(angles, slice_idx, n_pts, mask))
                             xz_fiber_indices_all.extend(matched_indices)
-                            # Ensure azimuths array has correct length for Y-Z or true azimuth mode
+                            # Get azimuths for Y-Z or true azimuth mode
                             if use_yz or use_true_azimuth:
-                                if slice_idx < len(azimuths) and len(azimuths[slice_idx]) == len(points):
-                                    xz_azimuths_all.extend(np.array(azimuths[slice_idx])[mask])
-                                else:
-                                    xz_azimuths_all.extend(np.zeros(n_matched))
+                                xz_azimuths_all.extend(get_slice_angles_masked_roi(azimuths, slice_idx, n_pts, mask))
                             if show_fiber_diameter and prop_axis == 1:
                                 xz_circle_centers.extend([(pt[0] + x_offset, slice_idx + z_offset) for pt in points[mask]])
 
@@ -5082,20 +5113,15 @@ class VisualizationTab(QWidget):
                         if np.any(mask):
                             matched_indices = np.where(mask)[0]
                             n_matched = len(matched_indices)
+                            n_pts = len(points)
                             yz_y_all.extend(points[mask, 1] + y_offset)
                             yz_z_all.extend(np.full(n_matched, slice_idx + z_offset))
-                            # Ensure angles array has correct length
-                            if slice_idx < len(angles) and len(angles[slice_idx]) == len(points):
-                                yz_angles_all.extend(np.array(angles[slice_idx])[mask])
-                            else:
-                                yz_angles_all.extend(np.zeros(n_matched))
+                            # Get angles with proper padding for resampled fibers
+                            yz_angles_all.extend(get_slice_angles_masked_roi(angles, slice_idx, n_pts, mask))
                             yz_fiber_indices_all.extend(matched_indices)
-                            # Ensure azimuths array has correct length for Y-Z or true azimuth mode
+                            # Get azimuths for Y-Z or true azimuth mode
                             if use_yz or use_true_azimuth:
-                                if slice_idx < len(azimuths) and len(azimuths[slice_idx]) == len(points):
-                                    yz_azimuths_all.extend(np.array(azimuths[slice_idx])[mask])
-                                else:
-                                    yz_azimuths_all.extend(np.zeros(n_matched))
+                                yz_azimuths_all.extend(get_slice_angles_masked_roi(azimuths, slice_idx, n_pts, mask))
                             if show_fiber_diameter and prop_axis == 0:
                                 yz_circle_centers.extend([(pt[1] + y_offset, slice_idx + z_offset) for pt in points[mask]])
 
@@ -5130,25 +5156,39 @@ class VisualizationTab(QWidget):
             fiber_diameter = getattr(self.fiber_trajectory, 'fiber_diameter', 7.0)
             radius = fiber_diameter / 2.0
 
+            # Helper function to get angle data with proper padding for resampled fibers
+            def get_padded_angles(angle_arr, slice_idx, n_pts):
+                if slice_idx < len(angle_arr):
+                    arr = np.array(angle_arr[slice_idx])
+                    if len(arr) == n_pts:
+                        return arr
+                    elif len(arr) < n_pts:
+                        # Pad with zeros for new fibers added by resampling
+                        return np.concatenate([arr, np.zeros(n_pts - len(arr))])
+                    else:
+                        # Truncate if somehow longer
+                        return arr[:n_pts]
+                return np.zeros(n_pts)
+
+            # Helper function to get padded angles for XZ/YZ slices with mask
+            def get_slice_angles_masked(angle_arr, slice_idx, n_pts, mask):
+                padded = get_padded_angles(angle_arr, slice_idx, n_pts)
+                return padded[mask]
+
             if z_pos < len(trajectories):
                 z, points = trajectories[z_pos]
                 n_points = len(points)
-                # Ensure angles array has correct length
-                if z_pos < len(angles) and len(angles[z_pos]) == n_points:
-                    slice_angles = np.array(angles[z_pos])
-                else:
-                    slice_angles = np.zeros(n_points)
+
+                slice_angles = get_padded_angles(angles, z_pos, n_points)
                 fiber_indices = np.arange(n_points)  # fiber index for each point
-                # Ensure azimuths array has correct length for Y-Z or true azimuth mode
+
+                # Get azimuths for Y-Z or true azimuth mode
                 if use_yz or use_true_azimuth:
-                    if z_pos < len(azimuths) and len(azimuths[z_pos]) == n_points:
-                        slice_azimuths = np.array(azimuths[z_pos])
-                    else:
-                        slice_azimuths = np.zeros(n_points)
+                    slice_azimuths = get_padded_angles(azimuths, z_pos, n_points)
                     if use_true_azimuth:
                         azimuth_angles = getattr(self.fiber_trajectory, 'azimuth_angles', None)
-                        if azimuth_angles and z_pos < len(azimuth_angles) and len(azimuth_angles[z_pos]) == n_points:
-                            slice_azimuth_angles = np.array(azimuth_angles[z_pos])
+                        if azimuth_angles:
+                            slice_azimuth_angles = get_padded_angles(azimuth_angles, z_pos, n_points)
                         else:
                             slice_azimuth_angles = slice_azimuths
                         colors = true_azimuth_to_colors(slice_azimuth_angles, slice_angles, fiber_indices)
@@ -5170,20 +5210,15 @@ class VisualizationTab(QWidget):
                 if np.any(mask):
                     matched_indices = np.where(mask)[0]
                     n_matched = len(matched_indices)
+                    n_pts = len(points)
                     xz_x_all.extend(points[mask, 0])
                     xz_z_all.extend(np.full(n_matched, slice_idx))
-                    # Ensure angles array has correct length
-                    if slice_idx < len(angles) and len(angles[slice_idx]) == len(points):
-                        xz_angles_all.extend(np.array(angles[slice_idx])[mask])
-                    else:
-                        xz_angles_all.extend(np.zeros(n_matched))
+                    # Get angles with proper padding for resampled fibers
+                    xz_angles_all.extend(get_slice_angles_masked(angles, slice_idx, n_pts, mask))
                     xz_fiber_indices_all.extend(matched_indices)
-                    # Ensure azimuths array has correct length for Y-Z or true azimuth mode
+                    # Get azimuths for Y-Z or true azimuth mode
                     if use_yz or use_true_azimuth:
-                        if slice_idx < len(azimuths) and len(azimuths[slice_idx]) == len(points):
-                            xz_azimuths_all.extend(np.array(azimuths[slice_idx])[mask])
-                        else:
-                            xz_azimuths_all.extend(np.zeros(n_matched))
+                        xz_azimuths_all.extend(get_slice_angles_masked(azimuths, slice_idx, n_pts, mask))
                     if show_fiber_diameter and prop_axis == 1:
                         xz_circle_centers.extend([(pt[0], slice_idx) for pt in points[mask]])
 
@@ -5215,20 +5250,15 @@ class VisualizationTab(QWidget):
                 if np.any(mask):
                     matched_indices = np.where(mask)[0]
                     n_matched = len(matched_indices)
+                    n_pts = len(points)
                     yz_y_all.extend(points[mask, 1])
                     yz_z_all.extend(np.full(n_matched, slice_idx))
-                    # Ensure angles array has correct length
-                    if slice_idx < len(angles) and len(angles[slice_idx]) == len(points):
-                        yz_angles_all.extend(np.array(angles[slice_idx])[mask])
-                    else:
-                        yz_angles_all.extend(np.zeros(n_matched))
+                    # Get angles with proper padding for resampled fibers
+                    yz_angles_all.extend(get_slice_angles_masked(angles, slice_idx, n_pts, mask))
                     yz_fiber_indices_all.extend(matched_indices)
-                    # Ensure azimuths array has correct length for Y-Z or true azimuth mode
+                    # Get azimuths for Y-Z or true azimuth mode
                     if use_yz or use_true_azimuth:
-                        if slice_idx < len(azimuths) and len(azimuths[slice_idx]) == len(points):
-                            yz_azimuths_all.extend(np.array(azimuths[slice_idx])[mask])
-                        else:
-                            yz_azimuths_all.extend(np.zeros(n_matched))
+                        yz_azimuths_all.extend(get_slice_angles_masked(azimuths, slice_idx, n_pts, mask))
                     if show_fiber_diameter and prop_axis == 0:
                         yz_circle_centers.extend([(pt[1], slice_idx) for pt in points[mask]])
 
@@ -5419,6 +5449,12 @@ class VisualizationTab(QWidget):
             QMessageBox.warning(self, "No Data", "No fiber trajectory data to export.")
             return
 
+        # Show export options dialog
+        dialog = ExportVTPDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        export_settings = dialog.getSettings()
+
         # Get save filename
         filename, selected_filter = QFileDialog.getSaveFileName(
             self, "Export Fiber Trajectory", "",
@@ -5435,8 +5471,9 @@ class VisualizationTab(QWidget):
             # Build polydata from trajectories
             all_points = []
             all_lines = []
-            all_tilt_angles = []
-            all_azimuth_angles = []
+            all_xz_angles = []      # X-Z Orientation (degrees)
+            all_yz_angles = []      # Y-Z Orientation (degrees)
+            all_azimuth_angles = [] # True Azimuth (-180 to 180 degrees)
             all_fiber_ids = []
             point_offset = 0
             global_fiber_idx = 0
@@ -5458,8 +5495,9 @@ class VisualizationTab(QWidget):
 
                 # Prefer fiber_trajectories (per-fiber data) over trajectories (per-slice data)
                 per_fiber_trajs = getattr(fiber_traj, 'fiber_trajectories', None)
-                per_fiber_angles = getattr(fiber_traj, 'fiber_angles', None)
-                per_fiber_azimuths = getattr(fiber_traj, 'fiber_azimuths', None)
+                per_fiber_angles = getattr(fiber_traj, 'fiber_angles', None)        # X-Z orientation
+                per_fiber_azimuths = getattr(fiber_traj, 'fiber_azimuths', None)    # Y-Z orientation
+                per_fiber_azimuth_angles = getattr(fiber_traj, 'fiber_azimuth_angles', None)  # True azimuth
 
                 if per_fiber_trajs and len(per_fiber_trajs) > 0:
                     # Use per-fiber trajectory data (more accurate for variable-length trajectories)
@@ -5468,39 +5506,45 @@ class VisualizationTab(QWidget):
                             continue  # Skip fibers with less than 2 points
 
                         fiber_points = []
-                        fiber_tilts = []
-                        fiber_azimuths_list = []
+                        fiber_xz_list = []
+                        fiber_yz_list = []
+                        fiber_azimuth_list = []
 
                         for pt_idx, (z, pt) in enumerate(traj):
-                            # Convert to global coordinates for Paraview
-                            # CT volume is stored as (Z, Y, X) in numpy, exported with flatten('F')
-                            # which maps to VTK's (X, Y, Z) ordering
-                            # So numpy Z -> VTK X, numpy Y -> VTK Y, numpy X -> VTK Z
-                            # pt[0] = x in image (column), pt[1] = y in image (row), z = slice index
-                            # For VTK: X=slice, Y=row, Z=column
+                            # Coordinate mapping for VTP export:
+                            # Internal: pt[0]=X (column), pt[1]=Y (row), z=Z (slice)
+                            # VTP: Keep same coordinate system (X, Y, Z)
                             fiber_points.append([
-                                z + z_offset,      # VTK X = slice index
-                                pt[1] + y_offset,  # VTK Y = row (y in image)
-                                pt[0] + x_offset   # VTK Z = column (x in image)
+                                pt[0] + x_offset,  # X = column
+                                pt[1] + y_offset,  # Y = row
+                                z + z_offset       # Z = slice index
                             ])
 
-                            # Get angles for this point
+                            # Get X-Z orientation angle
                             if per_fiber_angles and fiber_idx < len(per_fiber_angles) and pt_idx < len(per_fiber_angles[fiber_idx]):
-                                fiber_tilts.append(per_fiber_angles[fiber_idx][pt_idx])
+                                fiber_xz_list.append(per_fiber_angles[fiber_idx][pt_idx])
                             else:
-                                fiber_tilts.append(0.0)
+                                fiber_xz_list.append(0.0)
 
+                            # Get Y-Z orientation angle
                             if per_fiber_azimuths and fiber_idx < len(per_fiber_azimuths) and pt_idx < len(per_fiber_azimuths[fiber_idx]):
-                                fiber_azimuths_list.append(per_fiber_azimuths[fiber_idx][pt_idx])
+                                fiber_yz_list.append(per_fiber_azimuths[fiber_idx][pt_idx])
                             else:
-                                fiber_azimuths_list.append(0.0)
+                                fiber_yz_list.append(0.0)
+
+                            # Get true azimuth angle (-180 to 180 degrees)
+                            if per_fiber_azimuth_angles and fiber_idx < len(per_fiber_azimuth_angles) and pt_idx < len(per_fiber_azimuth_angles[fiber_idx]):
+                                fiber_azimuth_list.append(per_fiber_azimuth_angles[fiber_idx][pt_idx])
+                            else:
+                                fiber_azimuth_list.append(0.0)
 
                         if len(fiber_points) > 1:
                             # Add points
                             n_pts = len(fiber_points)
                             all_points.extend(fiber_points)
-                            all_tilt_angles.extend(fiber_tilts)
-                            all_azimuth_angles.extend(fiber_azimuths_list)
+                            all_xz_angles.extend(fiber_xz_list)
+                            all_yz_angles.extend(fiber_yz_list)
+                            all_azimuth_angles.extend(fiber_azimuth_list)
                             all_fiber_ids.extend([global_fiber_idx] * n_pts)
 
                             # Add line connectivity
@@ -5511,10 +5555,13 @@ class VisualizationTab(QWidget):
                 else:
                     # Fallback to slice-based trajectories data
                     trajectories = fiber_traj.trajectories
-                    angles = fiber_traj.angles if fiber_traj.angles else []
-                    azimuths = getattr(fiber_traj, 'azimuths', None)
+                    angles = fiber_traj.angles if fiber_traj.angles else []           # X-Z orientation
+                    azimuths = getattr(fiber_traj, 'azimuths', None)                   # Y-Z orientation
+                    azimuth_angles = getattr(fiber_traj, 'azimuth_angles', None)       # True azimuth
                     if azimuths is None:
                         azimuths = []
+                    if azimuth_angles is None:
+                        azimuth_angles = []
 
                     if not trajectories:
                         continue
@@ -5525,39 +5572,47 @@ class VisualizationTab(QWidget):
                     # Build fiber lines (each fiber is a polyline through all slices)
                     for fiber_idx in range(n_fibers):
                         fiber_points = []
-                        fiber_tilts = []
-                        fiber_azimuths_list = []
+                        fiber_xz_list = []
+                        fiber_yz_list = []
+                        fiber_azimuth_list = []
 
                         for slice_idx, (z, points) in enumerate(trajectories):
                             if fiber_idx < len(points):
                                 pt = points[fiber_idx]
-                                # Convert to global coordinates for Paraview
-                                # CT volume is stored as (Z, Y, X) in numpy, exported with flatten('F')
-                                # which maps to VTK's (X, Y, Z) ordering
-                                # For VTK: X=slice, Y=row, Z=column
+                                # Coordinate mapping for VTP export:
+                                # Internal: pt[0]=X (column), pt[1]=Y (row), z=Z (slice)
+                                # VTP: Keep same coordinate system (X, Y, Z)
                                 fiber_points.append([
-                                    z + z_offset,      # VTK X = slice index
-                                    pt[1] + y_offset,  # VTK Y = row (y in image)
-                                    pt[0] + x_offset   # VTK Z = column (x in image)
+                                    pt[0] + x_offset,  # X = column
+                                    pt[1] + y_offset,  # Y = row
+                                    z + z_offset       # Z = slice index
                                 ])
 
-                                # Get angles for this point
+                                # Get X-Z orientation angle
                                 if slice_idx < len(angles) and fiber_idx < len(angles[slice_idx]):
-                                    fiber_tilts.append(angles[slice_idx][fiber_idx])
+                                    fiber_xz_list.append(angles[slice_idx][fiber_idx])
                                 else:
-                                    fiber_tilts.append(0.0)
+                                    fiber_xz_list.append(0.0)
 
+                                # Get Y-Z orientation angle
                                 if slice_idx < len(azimuths) and fiber_idx < len(azimuths[slice_idx]):
-                                    fiber_azimuths_list.append(azimuths[slice_idx][fiber_idx])
+                                    fiber_yz_list.append(azimuths[slice_idx][fiber_idx])
                                 else:
-                                    fiber_azimuths_list.append(0.0)
+                                    fiber_yz_list.append(0.0)
+
+                                # Get true azimuth angle (-180 to 180 degrees)
+                                if slice_idx < len(azimuth_angles) and fiber_idx < len(azimuth_angles[slice_idx]):
+                                    fiber_azimuth_list.append(azimuth_angles[slice_idx][fiber_idx])
+                                else:
+                                    fiber_azimuth_list.append(0.0)
 
                         if len(fiber_points) > 1:
                             # Add points
                             n_pts = len(fiber_points)
                             all_points.extend(fiber_points)
-                            all_tilt_angles.extend(fiber_tilts)
-                            all_azimuth_angles.extend(fiber_azimuths_list)
+                            all_xz_angles.extend(fiber_xz_list)
+                            all_yz_angles.extend(fiber_yz_list)
+                            all_azimuth_angles.extend(fiber_azimuth_list)
                             all_fiber_ids.extend([global_fiber_idx] * n_pts)
 
                             # Add line connectivity
@@ -5578,23 +5633,73 @@ class VisualizationTab(QWidget):
             polydata.points = points_array
             polydata.lines = lines_array
 
-            # Add scalar arrays for coloring in Paraview
-            polydata.point_data['TiltAngle'] = np.array(all_tilt_angles)
-            polydata.point_data['AzimuthAngle'] = np.array(all_azimuth_angles)
-            polydata.point_data['FiberID'] = np.array(all_fiber_ids)
+            # Add scalar arrays based on export settings
+            exported_arrays = []
+
+            if export_settings['export_xz']:
+                polydata.point_data['XZ_Orientation'] = np.array(all_xz_angles)
+                exported_arrays.append("XZ_Orientation: X-Z plane angle (degrees)")
+
+            if export_settings['export_yz']:
+                polydata.point_data['YZ_Orientation'] = np.array(all_yz_angles)
+                exported_arrays.append("YZ_Orientation: Y-Z plane angle (degrees)")
+
+            if export_settings['export_fiber_id']:
+                polydata.point_data['FiberID'] = np.array(all_fiber_ids)
+                exported_arrays.append("FiberID: Unique fiber identifier")
+
+            # Convert azimuth from -180~180 to 0~360 for cyclic colormap
+            azimuth_arr = np.array(all_azimuth_angles)
+            azimuth_360 = np.where(azimuth_arr < 0, azimuth_arr + 360, azimuth_arr)
+
+            if export_settings['export_azimuth']:
+                polydata.point_data['Azimuth'] = azimuth_360
+                exported_arrays.append("Azimuth: True azimuth (0° to 360°, cyclic)")
+
+            if export_settings['export_azimuth_norm']:
+                # Normalize to 0-1 for direct use as Hue
+                azimuth_normalized = azimuth_360 / 360.0
+                polydata.point_data['Azimuth_Normalized'] = azimuth_normalized
+                exported_arrays.append("Azimuth_Normalized: Azimuth/360 (0-1, for Hue)")
+
+            # HSV to RGB conversion for pre-rendered color
+            # Saturation = Tilt angle (XZ_Orientation) normalized to 0-1
+            if export_settings.get('export_rgb', False):
+                from matplotlib.colors import hsv_to_rgb
+
+                # Use XZ_Orientation (tilt angle) as saturation
+                xz_arr = np.array(all_xz_angles)
+                tilt_abs = np.abs(xz_arr)
+                # Use saturation range from settings
+                sat_min = self.trajectory_settings.get('saturation_min', 0.0)
+                sat_max = self.trajectory_settings.get('saturation_max', 45.0)
+                sat_range = sat_max - sat_min if sat_max > sat_min else 1.0
+                saturation_values = np.clip((tilt_abs - sat_min) / sat_range, 0, 1)
+
+                # Build HSV array: H=azimuth, S=tilt, V=1.0
+                n_points = len(azimuth_360)
+                hsv = np.zeros((n_points, 3))
+                hsv[:, 0] = azimuth_360 / 360.0  # Hue (0-1)
+                hsv[:, 1] = saturation_values     # Saturation based on tilt
+                hsv[:, 2] = 1.0                   # Value (brightness)
+
+                # Convert to RGB (0-255 for VTK)
+                rgb = hsv_to_rgb(hsv)
+                rgb_uint8 = (rgb * 255).astype(np.uint8)
+
+                polydata.point_data['Azimuth_RGB'] = rgb_uint8
+                exported_arrays.append("Azimuth_RGB: HSV color (H=Azimuth, S=Tilt)")
 
             # Save to file
             polydata.save(filename)
 
+            arrays_str = "\n".join(f"- {a}" for a in exported_arrays)
             QMessageBox.information(
                 self, "Export Successful",
                 f"Fiber trajectories exported to:\n{filename}\n\n"
                 f"Total fibers: {global_fiber_idx}\n"
                 f"Total points: {len(all_points)}\n\n"
-                "Available scalar arrays in Paraview:\n"
-                "- TiltAngle: Fiber tilt angle (degrees)\n"
-                "- AzimuthAngle: Fiber azimuth angle (degrees)\n"
-                "- FiberID: Unique fiber identifier"
+                f"Exported scalar arrays:\n{arrays_str}"
             )
 
         except Exception as e:
@@ -5602,416 +5707,6 @@ class VisualizationTab(QWidget):
             traceback.print_exc()
             QMessageBox.critical(self, "Export Error", f"Failed to export: {str(e)}")
 
-    def showExportScreenshotDialog(self):
-        """Show export screenshot dialog."""
-        dialog = ExportScreenshotDialog(self)
-        if dialog.exec() == QDialog.Accepted:
-            self.exportScreenshot(dialog.getSettings())
-
-    def exportScreenshot(self, settings):
-        """Export screenshot with specified settings."""
-        view_type = settings['view']
-        bg_color = settings['background']
-        include_ct = settings['include_ct']
-        resolution = settings.get('resolution', (1280, 960))
-        include_legend = settings.get('include_legend', True)
-
-        # Get save filename
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Save Screenshot", "",
-            "PNG Files (*.png);;JPEG Files (*.jpg);;All Files (*)"
-        )
-        if not filename:
-            return
-
-        # Ensure extension
-        if not filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-            filename += '.png'
-
-        try:
-            if view_type == '3D View':
-                self._export_3d_screenshot(filename, bg_color, resolution, include_legend)
-            else:
-                self._export_slice_screenshot(filename, view_type, bg_color, include_ct, resolution, include_legend)
-            QMessageBox.information(self, "Success", f"Screenshot saved to:\n{filename}")
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to save screenshot:\n{str(e)}")
-
-    def _export_3d_screenshot(self, filename, bg_color, resolution, include_legend=True):
-        """Export 3D view screenshot."""
-        import matplotlib.pyplot as plt
-        from PIL import Image
-        import io
-
-        # Set background color
-        if bg_color == 'White':
-            self.plotter_3d.set_background('white')
-            text_color = 'black'
-        elif bg_color == 'Gray':
-            self.plotter_3d.set_background(COLORS['viewer_bg_export'])
-            text_color = 'white'
-        else:  # Transparent
-            self.plotter_3d.set_background('white')
-            text_color = 'black'
-
-        # Take screenshot with specified resolution
-        screenshot_array = self.plotter_3d.screenshot(
-            transparent_background=(bg_color == 'Transparent'),
-            window_size=resolution,
-            return_img=True
-        )
-
-        # Restore original background
-        self.plotter_3d.set_background(COLORS['chart_bg'])
-
-        # Check if we need to add color legend
-        color_by_angle = self.trajectory_settings['color_by_angle']
-        color_mode = self.color_mode_combo.currentText()
-        use_true_azimuth = color_mode == "Azimuth"
-
-        if include_legend and color_by_angle:
-            # Add colorbar for all angle modes (linear colormap)
-            cmap_name = self.colormap_combo.currentText()
-            if use_true_azimuth:
-                angle_min = -180.0
-                angle_max = 180.0
-            else:
-                angle_min = self.trajectory_settings['tilt_min']
-                angle_max = self.trajectory_settings['tilt_max']
-            self._add_colorbar_to_3d_screenshot(screenshot_array, filename, text_color, bg_color, cmap_name, angle_min, angle_max)
-        else:
-            # Save directly without legend
-            img = Image.fromarray(screenshot_array)
-            img.save(filename)
-
-    def _export_slice_screenshot(self, filename, view_type, bg_color, include_ct, resolution, include_legend=True):
-        """Export slice view screenshot."""
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Circle
-
-        # Map view type to viewport index
-        view_map = {'XY Slice': 1, 'XZ Slice': 2, 'YZ Slice': 3}
-        viewport_idx = view_map.get(view_type, 1)
-
-        # Determine background color
-        transparent = False
-        if bg_color == 'White':
-            face_color = 'white'
-            text_color = 'black'
-        elif bg_color == 'Gray':
-            face_color = COLORS['viewer_bg_export']
-            text_color = 'white'
-        else:  # Transparent
-            face_color = 'white'
-            text_color = 'black'
-            transparent = True
-
-        # If resolution is None (Current View), save directly from canvas
-        if resolution is None:
-            if viewport_idx < len(self.viewport_frames):
-                canvas = self.viewport_frames[viewport_idx]['canvas']
-                if canvas and hasattr(canvas, 'figure'):
-                    fig = canvas.figure
-
-                    # Store original colors
-                    original_facecolor = fig.get_facecolor()
-                    original_ax_colors = []
-                    original_ax_patch_colors = []
-
-                    # Set background for saving
-                    if transparent:
-                        # For transparent, set figure background to transparent
-                        fig.set_facecolor('none')
-                        for ax in fig.get_axes():
-                            original_ax_colors.append(ax.get_facecolor())
-                            original_ax_patch_colors.append(ax.patch.get_facecolor())
-                            ax.set_facecolor('none')
-                            ax.patch.set_facecolor('none')
-                    else:
-                        fig.set_facecolor(face_color)
-                        for ax in fig.get_axes():
-                            original_ax_colors.append(ax.get_facecolor())
-                            original_ax_patch_colors.append(ax.patch.get_facecolor())
-                            ax.set_facecolor(face_color)
-                            ax.patch.set_facecolor(face_color)
-
-                    # Save without bbox_inches='tight' to preserve axis labels
-                    fig.savefig(filename, facecolor=fig.get_facecolor(),
-                               edgecolor='none', transparent=transparent)
-
-                    # Restore original background
-                    fig.set_facecolor(original_facecolor)
-                    for ax, orig_color, orig_patch in zip(fig.get_axes(), original_ax_colors, original_ax_patch_colors):
-                        ax.set_facecolor(orig_color)
-                        ax.patch.set_facecolor(orig_patch)
-                    canvas.draw()
-                    return
-
-        # Calculate figure size based on resolution (use 100 dpi)
-        dpi = 100
-        fig_width = resolution[0] / dpi
-        fig_height = resolution[1] / dpi
-
-        # Create figure with appropriate background and resolution
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor=face_color, dpi=dpi)
-        ax.set_facecolor(face_color if face_color != 'none' else 'white')
-
-        # Get current slice positions
-        z_pos = self.current_slice['z']
-        y_pos = self.current_slice['y']
-        x_pos = self.current_slice['x']
-
-        # Get visualization settings
-        color_by_angle = self.trajectory_settings['color_by_angle']
-        color_mode = self.color_mode_combo.currentText()
-        use_xz = "X-Z" in color_mode
-        use_yz = "Y-Z" in color_mode
-        use_true_azimuth = color_mode == "Azimuth"
-        cmap_name = self.colormap_combo.currentText()
-        # Set appropriate angle range based on color mode
-        if use_true_azimuth:
-            angle_min = -180.0
-            angle_max = 180.0
-        else:
-            angle_min = self.trajectory_settings['tilt_min']
-            angle_max = self.trajectory_settings['tilt_max']
-        show_fiber_diameter = self.trajectory_settings['show_fiber_diameter']
-
-        cmap = plt.get_cmap(cmap_name)
-
-        def angle_to_color(angle):
-            if not color_by_angle:
-                return 'blue'
-            norm_angle = np.clip((angle - angle_min) / (angle_max - angle_min + 1e-6), 0, 1)
-            return cmap(norm_angle)
-
-        def true_azimuth_to_color(azimuth, tilt_angle=None):
-            """Color function for true azimuth mode (-180 to 180) using linear colormap."""
-            if not color_by_angle:
-                return 'blue'
-            # Use linear colormap for azimuth
-            norm_angle = np.clip((azimuth - angle_min) / (angle_max - angle_min + 1e-6), 0, 1)
-            return cmap(norm_angle)
-
-        # Determine which slice to export
-        if view_type == 'XY Slice':
-            slice_idx = z_pos
-            if include_ct and self.main_window and self.main_window.viewer and self.main_window.viewer.current_volume is not None:
-                vol = self.main_window.viewer.current_volume
-                if slice_idx < vol.shape[0]:
-                    ax.imshow(vol[slice_idx], cmap='gray', origin='lower', alpha=0.7)
-
-            # Plot fiber points
-            self._plot_xy_slice_for_export(ax, z_pos, use_yz, use_true_azimuth, angle_to_color, true_azimuth_to_color, show_fiber_diameter)
-            ax.set_xlabel('X', color=text_color)
-            ax.set_ylabel('Y', color=text_color)
-            ax.set_title(f'XY Slice (Z={slice_idx})', color=text_color)
-
-        elif view_type == 'XZ Slice':
-            slice_idx = y_pos
-            if include_ct and self.main_window and self.main_window.viewer and self.main_window.viewer.current_volume is not None:
-                vol = self.main_window.viewer.current_volume
-                if slice_idx < vol.shape[1]:
-                    ax.imshow(vol[:, slice_idx, :].T, cmap='gray', origin='lower', aspect='auto', alpha=0.7)
-
-            self._plot_xz_slice_for_export(ax, y_pos, use_yz, use_true_azimuth, angle_to_color, true_azimuth_to_color, show_fiber_diameter)
-            ax.set_xlabel('Z', color=text_color)
-            ax.set_ylabel('X', color=text_color)
-            ax.set_title(f'XZ Slice (Y={slice_idx})', color=text_color)
-
-        elif view_type == 'YZ Slice':
-            slice_idx = x_pos
-            if include_ct and self.main_window and self.main_window.viewer and self.main_window.viewer.current_volume is not None:
-                vol = self.main_window.viewer.current_volume
-                if slice_idx < vol.shape[2]:
-                    ax.imshow(vol[:, :, slice_idx].T, cmap='gray', origin='lower', aspect='auto', alpha=0.7)
-
-            self._plot_yz_slice_for_export(ax, x_pos, use_yz, use_true_azimuth, angle_to_color, true_azimuth_to_color, show_fiber_diameter)
-            ax.set_xlabel('Z', color=text_color)
-            ax.set_ylabel('Y', color=text_color)
-            ax.set_title(f'YZ Slice (X={slice_idx})', color=text_color)
-
-        ax.tick_params(colors=text_color)
-        ax.set_aspect('equal')
-
-        # Add color legend if requested (linear colorbar for all modes)
-        if include_legend and color_by_angle:
-            self._add_colorbar_to_export(fig, ax, cmap, angle_min, angle_max, text_color)
-
-        # Save with transparency if requested
-        plt.savefig(filename, dpi=150, bbox_inches='tight',
-                   transparent=(bg_color == 'Transparent'),
-                   facecolor=face_color if face_color != 'none' else 'white')
-        plt.close(fig)
-
-    def _add_colorbar_to_export(self, fig, ax, cmap, vmin, vmax, text_color):
-        """Add colorbar to export figure."""
-        from mpl_toolkits.axes_grid1 import make_axes_locatable
-        import matplotlib.pyplot as plt
-
-        # Create a ScalarMappable for the colorbar
-        norm = plt.Normalize(vmin=vmin, vmax=vmax)
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-
-        # Add colorbar
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="3%", pad=0.1)
-        cbar = fig.colorbar(sm, cax=cax)
-        cbar.set_label('Tilt Angle (°)', color=text_color)
-        cbar.ax.yaxis.set_tick_params(color=text_color)
-        cbar.ax.yaxis.set_ticklabels(cbar.ax.get_yticks(), color=text_color)
-        for label in cbar.ax.get_yticklabels():
-            label.set_color(text_color)
-
-    def _add_colorbar_to_3d_screenshot(self, screenshot_array, filename, text_color, bg_color, cmap_name, vmin, vmax):
-        """Add colorbar legend to 3D screenshot and save."""
-        import matplotlib.pyplot as plt
-        from PIL import Image
-
-        # Get image dimensions
-        height, width = screenshot_array.shape[:2]
-
-        # Create figure matching screenshot size
-        dpi = 100
-        fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
-
-        # Set background
-        if bg_color == 'White':
-            fig.patch.set_facecolor('white')
-        elif bg_color == 'Gray':
-            fig.patch.set_facecolor(COLORS['viewer_bg_export'])
-        else:
-            fig.patch.set_alpha(0)
-
-        # Add screenshot as background
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.imshow(screenshot_array)
-        ax.axis('off')
-
-        # Add colorbar on right side
-        cax = fig.add_axes([0.92, 0.15, 0.02, 0.3])
-        cmap = plt.get_cmap(cmap_name)
-        norm = plt.Normalize(vmin=vmin, vmax=vmax)
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        cbar = fig.colorbar(sm, cax=cax)
-        cbar.set_label('Tilt Angle (°)', color=text_color, fontsize=10)
-        cbar.ax.yaxis.set_tick_params(color=text_color, labelcolor=text_color)
-        for label in cbar.ax.get_yticklabels():
-            label.set_color(text_color)
-
-        # Save
-        plt.savefig(filename, dpi=dpi, bbox_inches='tight', pad_inches=0,
-                   transparent=(bg_color == 'Transparent'))
-        plt.close(fig)
-
-    def _plot_xy_slice_for_export(self, ax, z_pos, use_yz, use_true_azimuth, angle_to_color, azimuth_to_color, show_diameter):
-        """Plot XY slice fiber points for export."""
-        from matplotlib.patches import Circle
-
-        tolerance = 3
-        all_trajectories = [(self.fiber_trajectory, 0, 0, 0)] if self.fiber_trajectory else []
-        for roi_name, roi_data in self.roi_trajectories.items():
-            if isinstance(roi_data, dict):
-                offset = roi_data['offset']
-                all_trajectories.append((roi_data['trajectory'], offset[2], offset[1], offset[0]))
-
-        for fiber_traj, x_offset, y_offset, z_offset in all_trajectories:
-            if fiber_traj is None:
-                continue
-            trajectories = fiber_traj.trajectories
-            angles = fiber_traj.angles
-            azimuths = getattr(fiber_traj, 'azimuths', angles)
-            azimuth_angles = getattr(fiber_traj, 'azimuth_angles', azimuths)
-            fiber_diameter = getattr(fiber_traj, 'fiber_diameter', 7.0)
-            radius = fiber_diameter / 2.0
-
-            roi_z_pos = z_pos - z_offset
-            if 0 <= roi_z_pos < len(trajectories):
-                z, points = trajectories[roi_z_pos]
-                slice_angles = angles[roi_z_pos] if roi_z_pos < len(angles) else np.zeros(len(points))
-                if use_true_azimuth and roi_z_pos < len(azimuth_angles):
-                    colors = [azimuth_to_color(az, tilt) for az, tilt in zip(azimuth_angles[roi_z_pos], slice_angles)]
-                elif use_yz and roi_z_pos < len(azimuths):
-                    colors = [angle_to_color(a) for a in azimuths[roi_z_pos]]
-                else:
-                    colors = [angle_to_color(a) for a in slice_angles]
-                ax.scatter(points[:, 0] + x_offset, points[:, 1] + y_offset, c=colors, s=10, alpha=0.8)
-
-                if show_diameter:
-                    for pt in points:
-                        circle = Circle((pt[0] + x_offset, pt[1] + y_offset), radius,
-                                       fill=False, edgecolor='red', linewidth=0.5)
-                        ax.add_patch(circle)
-
-    def _plot_xz_slice_for_export(self, ax, y_pos, use_yz, use_true_azimuth, angle_to_color, azimuth_to_color, show_diameter):
-        """Plot XZ slice fiber points for export."""
-        from matplotlib.patches import Circle
-        tolerance = 3
-
-        all_trajectories = [(self.fiber_trajectory, 0, 0, 0)] if self.fiber_trajectory else []
-        for roi_name, roi_data in self.roi_trajectories.items():
-            if isinstance(roi_data, dict):
-                offset = roi_data['offset']
-                all_trajectories.append((roi_data['trajectory'], offset[2], offset[1], offset[0]))
-
-        for fiber_traj, x_offset, y_offset, z_offset in all_trajectories:
-            if fiber_traj is None:
-                continue
-            trajectories = fiber_traj.trajectories
-            angles = fiber_traj.angles
-            azimuths = getattr(fiber_traj, 'azimuths', angles)
-            azimuth_angles = getattr(fiber_traj, 'azimuth_angles', azimuths)
-
-            roi_y_pos = y_pos - y_offset
-            for slice_idx, (z, points) in enumerate(trajectories):
-                mask = np.abs(points[:, 1] - roi_y_pos) < tolerance
-                if np.any(mask):
-                    x_coords = points[mask, 0] + x_offset
-                    z_coords = np.full(np.sum(mask), z + z_offset)
-                    slice_angles = angles[slice_idx] if slice_idx < len(angles) else np.zeros(len(points))
-                    if use_true_azimuth and slice_idx < len(azimuth_angles):
-                        colors = [azimuth_to_color(az, tilt) for az, tilt in zip(np.array(azimuth_angles[slice_idx])[mask], slice_angles[mask])]
-                    elif use_yz and slice_idx < len(azimuths):
-                        colors = [angle_to_color(a) for a in np.array(azimuths[slice_idx])[mask]]
-                    else:
-                        colors = [angle_to_color(a) for a in slice_angles[mask]]
-                    ax.scatter(z_coords, x_coords, c=colors, s=5, alpha=0.6)
-
-    def _plot_yz_slice_for_export(self, ax, x_pos, use_yz, use_true_azimuth, angle_to_color, azimuth_to_color, show_diameter):
-        """Plot YZ slice fiber points for export."""
-        from matplotlib.patches import Circle
-        tolerance = 3
-
-        all_trajectories = [(self.fiber_trajectory, 0, 0, 0)] if self.fiber_trajectory else []
-        for roi_name, roi_data in self.roi_trajectories.items():
-            if isinstance(roi_data, dict):
-                offset = roi_data['offset']
-                all_trajectories.append((roi_data['trajectory'], offset[2], offset[1], offset[0]))
-
-        for fiber_traj, x_offset, y_offset, z_offset in all_trajectories:
-            if fiber_traj is None:
-                continue
-            trajectories = fiber_traj.trajectories
-            angles = fiber_traj.angles
-            azimuths = getattr(fiber_traj, 'azimuths', angles)
-            azimuth_angles = getattr(fiber_traj, 'azimuth_angles', azimuths)
-
-            roi_x_pos = x_pos - x_offset
-            for slice_idx, (z, points) in enumerate(trajectories):
-                mask = np.abs(points[:, 0] - roi_x_pos) < tolerance
-                if np.any(mask):
-                    y_coords = points[mask, 1] + y_offset
-                    z_coords = np.full(np.sum(mask), z + z_offset)
-                    slice_angles = angles[slice_idx] if slice_idx < len(angles) else np.zeros(len(points))
-                    if use_true_azimuth and slice_idx < len(azimuth_angles):
-                        colors = [azimuth_to_color(az, tilt) for az, tilt in zip(np.array(azimuth_angles[slice_idx])[mask], slice_angles[mask])]
-                    elif use_yz and slice_idx < len(azimuths):
-                        colors = [angle_to_color(a) for a in np.array(azimuths[slice_idx])[mask]]
-                    else:
-                        colors = [angle_to_color(a) for a in slice_angles[mask]]
-                    ax.scatter(z_coords, y_coords, c=colors, s=5, alpha=0.6)
 
 
 class AnalysisTab(QWidget):
@@ -7153,24 +6848,31 @@ class AnalysisTab(QWidget):
             phi = orientation_data['phi']
             reference = orientation_data.get('reference', None)
 
+            # Transpose from (Z, Y, X) to (X, Y, Z) for VTK coordinate system
+            # This matches the fiber trajectory VTP export coordinate system
+            theta_vtk = np.transpose(theta, (2, 1, 0))
+            phi_vtk = np.transpose(phi, (2, 1, 0))
+            if reference is not None:
+                reference_vtk = np.transpose(reference, (2, 1, 0))
+
             # Create VTK ImageData (uniform grid)
             grid = pv.ImageData()
-            grid.dimensions = np.array(theta.shape) + 1  # VTK needs n+1 for cell data
+            grid.dimensions = np.array(theta_vtk.shape) + 1  # VTK needs n+1 for cell data
             grid.spacing = (1, 1, 1)
 
             exported_fields = []
 
             # Add selected scalar arrays
             if theta_check.isChecked():
-                grid.cell_data['Theta'] = theta.flatten(order='F')
+                grid.cell_data['Theta'] = theta_vtk.flatten(order='F')
                 exported_fields.append("Theta (Azimuthal angle)")
 
             if phi_check.isChecked():
-                grid.cell_data['Phi'] = phi.flatten(order='F')
+                grid.cell_data['Phi'] = phi_vtk.flatten(order='F')
                 exported_fields.append("Phi (Elevation angle)")
 
             if reference_check.isChecked() and reference is not None:
-                grid.cell_data['Reference'] = reference.flatten(order='F')
+                grid.cell_data['Reference'] = reference_vtk.flatten(order='F')
                 exported_fields.append("Reference (Angle from reference axis)")
 
             grid.save(filename)
@@ -7210,16 +6912,20 @@ class AnalysisTab(QWidget):
         try:
             vf_map = self.vf_map
 
+            # Transpose from (Z, Y, X) to (X, Y, Z) for VTK coordinate system
+            # This matches the fiber trajectory VTP export coordinate system
+            vf_map_vtk = np.transpose(vf_map, (2, 1, 0))
+
             # Create VTK ImageData
             grid = pv.ImageData()
-            grid.dimensions = np.array(vf_map.shape) + 1
+            grid.dimensions = np.array(vf_map_vtk.shape) + 1
             grid.spacing = (1, 1, 1)
 
             # Add Vf as cell data
-            grid.cell_data['VolumeFraction'] = vf_map.flatten(order='F')
+            grid.cell_data['VolumeFraction'] = vf_map_vtk.flatten(order='F')
 
             # Also add percentage for convenience
-            grid.cell_data['Vf_Percent'] = (vf_map * 100).flatten(order='F')
+            grid.cell_data['Vf_Percent'] = (vf_map_vtk * 100).flatten(order='F')
 
             grid.save(filename)
 
@@ -8737,6 +8443,8 @@ class FiberTrajectorySettingsDialog(QDialog):
             'integration_method': 'RK4',
             'tilt_min': -20.0,
             'tilt_max': 20.0,
+            'saturation_min': 0.0,
+            'saturation_max': 45.0,
             'relax': True,
             'color_by_angle': True,
             'color_by_fiber': False,
@@ -8808,6 +8516,25 @@ class FiberTrajectorySettingsDialog(QDialog):
         self.tilt_max_spin.setSuffix("°")
         tilt_layout.addWidget(self.tilt_max_spin)
         color_layout.addRow("X-Z/Y-Z Range:", tilt_widget)
+
+        # Saturation Range (for Azimuth saturation mode)
+        sat_widget = QWidget()
+        sat_layout = QHBoxLayout(sat_widget)
+        sat_layout.setContentsMargins(0, 0, 0, 0)
+        self.sat_min_spin = QDoubleSpinBox()
+        self.sat_min_spin.setRange(0, 90)
+        self.sat_min_spin.setValue(self.settings.get('saturation_min', 0.0))
+        self.sat_min_spin.setSuffix("°")
+        self.sat_min_spin.setToolTip("Tilt angle for minimum saturation (white)")
+        sat_layout.addWidget(self.sat_min_spin)
+        sat_layout.addWidget(QLabel("-"))
+        self.sat_max_spin = QDoubleSpinBox()
+        self.sat_max_spin.setRange(0, 90)
+        self.sat_max_spin.setValue(self.settings.get('saturation_max', 45.0))
+        self.sat_max_spin.setSuffix("°")
+        self.sat_max_spin.setToolTip("Tilt angle for maximum saturation (full color)")
+        sat_layout.addWidget(self.sat_max_spin)
+        color_layout.addRow("Saturation Range:", sat_widget)
 
         layout.addWidget(color_group)
 
@@ -9035,6 +8762,8 @@ class FiberTrajectorySettingsDialog(QDialog):
             'integration_method': self.integration_method_combo.currentText(),
             'tilt_min': self.tilt_min_spin.value(),
             'tilt_max': self.tilt_max_spin.value(),
+            'saturation_min': self.sat_min_spin.value(),
+            'saturation_max': self.sat_max_spin.value(),
             'relax': self.relax_check.isChecked(),
             'color_by_angle': self.color_by_angle_check.isChecked(),
             'color_by_fiber': self.color_by_fiber_check.isChecked(),
@@ -10550,6 +10279,78 @@ class VMMMainWindow(QMainWindow):
         self.noise_group.setVisible(False)  # Initially hidden
         slider_layout.addWidget(noise_group)
 
+        # Image Adjustment Group
+        adjustment_group = QGroupBox("Image Adjustment")
+        adjustment_layout = QGridLayout(adjustment_group)
+        adjustment_layout.setSpacing(5)
+
+        # Brightness slider
+        adjustment_layout.addWidget(QLabel("Brightness:"), 0, 0)
+        self.brightness_slider = QSlider(Qt.Horizontal)
+        self.brightness_slider.setRange(-100, 100)
+        self.brightness_slider.setValue(0)
+        self.brightness_slider.valueChanged.connect(self.onAdjustmentChanged)
+        adjustment_layout.addWidget(self.brightness_slider, 0, 1)
+        self.brightness_label = QLabel("0")
+        self.brightness_label.setMinimumWidth(35)
+        self.brightness_label.setAlignment(Qt.AlignRight)
+        adjustment_layout.addWidget(self.brightness_label, 0, 2)
+
+        # Contrast slider
+        adjustment_layout.addWidget(QLabel("Contrast:"), 1, 0)
+        self.contrast_slider = QSlider(Qt.Horizontal)
+        self.contrast_slider.setRange(10, 300)  # 0.1 to 3.0
+        self.contrast_slider.setValue(100)
+        self.contrast_slider.valueChanged.connect(self.onAdjustmentChanged)
+        adjustment_layout.addWidget(self.contrast_slider, 1, 1)
+        self.contrast_label = QLabel("1.0")
+        self.contrast_label.setMinimumWidth(35)
+        self.contrast_label.setAlignment(Qt.AlignRight)
+        adjustment_layout.addWidget(self.contrast_label, 1, 2)
+
+        # Gamma slider
+        adjustment_layout.addWidget(QLabel("Gamma:"), 2, 0)
+        self.gamma_slider = QSlider(Qt.Horizontal)
+        self.gamma_slider.setRange(10, 300)  # 0.1 to 3.0
+        self.gamma_slider.setValue(100)
+        self.gamma_slider.valueChanged.connect(self.onAdjustmentChanged)
+        adjustment_layout.addWidget(self.gamma_slider, 2, 1)
+        self.gamma_label = QLabel("1.0")
+        self.gamma_label.setMinimumWidth(35)
+        self.gamma_label.setAlignment(Qt.AlignRight)
+        adjustment_layout.addWidget(self.gamma_label, 2, 2)
+
+        # Sharpness slider
+        adjustment_layout.addWidget(QLabel("Sharpness:"), 3, 0)
+        self.sharpness_slider = QSlider(Qt.Horizontal)
+        self.sharpness_slider.setRange(0, 100)
+        self.sharpness_slider.setValue(0)
+        self.sharpness_slider.valueChanged.connect(self.onAdjustmentChanged)
+        adjustment_layout.addWidget(self.sharpness_slider, 3, 1)
+        self.sharpness_label = QLabel("0")
+        self.sharpness_label.setMinimumWidth(35)
+        self.sharpness_label.setAlignment(Qt.AlignRight)
+        adjustment_layout.addWidget(self.sharpness_label, 3, 2)
+
+        # Invert checkbox
+        self.invert_check = QCheckBox("Invert")
+        self.invert_check.stateChanged.connect(self.onAdjustmentChanged)
+        adjustment_layout.addWidget(self.invert_check, 4, 0, 1, 2)
+
+        # Reset button
+        self.reset_adjustment_btn = QPushButton("Reset")
+        self.reset_adjustment_btn.clicked.connect(self.resetAdjustments)
+        adjustment_layout.addWidget(self.reset_adjustment_btn, 4, 2)
+
+        # Apply to Volume button
+        self.apply_adjustment_btn = QPushButton("Apply to Volume")
+        self.apply_adjustment_btn.setToolTip("Apply adjustments permanently to the volume data")
+        self.apply_adjustment_btn.clicked.connect(self.applyAdjustmentsToVolume)
+        adjustment_layout.addWidget(self.apply_adjustment_btn, 5, 0, 1, 3)
+
+        self.adjustment_group = adjustment_group
+        slider_layout.addWidget(adjustment_group)
+
         slider_layout.addStretch()
 
         slider_scroll.setWidget(slider_panel)
@@ -10699,14 +10500,15 @@ class VMMMainWindow(QMainWindow):
         export_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
         export_layout = QHBoxLayout(export_group)
 
-        self.screenshot_btn = RibbonButton("Screen\nshot")
-        self.screenshot_btn.clicked.connect(self.takeScreenshot)
-        export_layout.addWidget(self.screenshot_btn)
-
         self.export_vtk_btn = RibbonButton("Export\nVTK")
         self.export_vtk_btn.setToolTip("Export CT volume to VTK format for Paraview")
         self.export_vtk_btn.clicked.connect(self.export3D)
         export_layout.addWidget(self.export_vtk_btn)
+
+        self.export_settings_btn = RibbonButton("Export\nSettings")
+        self.export_settings_btn.setToolTip("Export image adjustment settings to text file")
+        self.export_settings_btn.clicked.connect(self.exportAdjustmentSettings)
+        export_layout.addWidget(self.export_settings_btn)
 
         layout.addWidget(export_group)
         layout.addStretch()
@@ -10924,11 +10726,6 @@ class VMMMainWindow(QMainWindow):
         export_group.setStyleSheet("QGroupBox::title { font-weight: bold; }")
         export_layout = QHBoxLayout(export_group)
 
-        self.export_screenshot_btn = RibbonButton("Export\nScreenshot")
-        self.export_screenshot_btn.setEnabled(False)
-        self.export_screenshot_btn.clicked.connect(self.modelling_tab.showExportScreenshotDialog)
-        export_layout.addWidget(self.export_screenshot_btn)
-
         self.export_traj_vtk_btn = RibbonButton("Export\nVTK")
         self.export_traj_vtk_btn.setEnabled(False)
         self.export_traj_vtk_btn.clicked.connect(self.modelling_tab.exportTrajectoryToVTK)
@@ -11034,15 +10831,6 @@ class VMMMainWindow(QMainWindow):
     def resetView(self):
         if self.viewer:
             self.viewer.resetCamera()
-
-    def takeScreenshot(self):
-        if self.viewer:
-            filename, _ = QFileDialog.getSaveFileName(
-                self, "Save Screenshot", "", "PNG Files (*.png);;All Files (*)"
-            )
-            if filename:
-                self.viewer.screenshot(filename)
-                QMessageBox.information(self, "Success", f"Screenshot saved to {filename}")
 
     def export3D(self):
         """Export CT volume to VTK - delegate to VolumeTab"""
@@ -11685,6 +11473,142 @@ class VMMMainWindow(QMainWindow):
     def hideHistogramPanel(self):
         """Hide the histogram panel"""
         self.histogram_panel.setVisible(False)
+
+    def onAdjustmentChanged(self):
+        """Handle changes to image adjustment sliders"""
+        # Update labels
+        brightness = self.brightness_slider.value()
+        contrast = self.contrast_slider.value() / 100.0
+        gamma = self.gamma_slider.value() / 100.0
+        sharpness = self.sharpness_slider.value()
+        invert = self.invert_check.isChecked()
+
+        self.brightness_label.setText(f"{brightness:+d}" if brightness != 0 else "0")
+        self.contrast_label.setText(f"{contrast:.2f}")
+        self.gamma_label.setText(f"{gamma:.2f}")
+        self.sharpness_label.setText(str(sharpness))
+
+        # Update viewer's adjuster settings
+        if hasattr(self, 'viewer') and self.viewer:
+            self.viewer.adjuster.settings.brightness = float(brightness)
+            self.viewer.adjuster.settings.contrast = contrast
+            self.viewer.adjuster.settings.gamma = gamma
+            self.viewer.adjuster.settings.sharpness = float(sharpness)
+            self.viewer.adjuster.settings.invert = invert
+
+            # Re-render with new adjustments
+            self.viewer.renderVolume()
+
+    def resetAdjustments(self):
+        """Reset all image adjustments to default values"""
+        # Block signals to prevent multiple renders
+        self.brightness_slider.blockSignals(True)
+        self.contrast_slider.blockSignals(True)
+        self.gamma_slider.blockSignals(True)
+        self.sharpness_slider.blockSignals(True)
+        self.invert_check.blockSignals(True)
+
+        self.brightness_slider.setValue(0)
+        self.contrast_slider.setValue(100)
+        self.gamma_slider.setValue(100)
+        self.sharpness_slider.setValue(0)
+        self.invert_check.setChecked(False)
+
+        # Unblock signals
+        self.brightness_slider.blockSignals(False)
+        self.contrast_slider.blockSignals(False)
+        self.gamma_slider.blockSignals(False)
+        self.sharpness_slider.blockSignals(False)
+        self.invert_check.blockSignals(False)
+
+        # Update labels
+        self.brightness_label.setText("0")
+        self.contrast_label.setText("1.0")
+        self.gamma_label.setText("1.0")
+        self.sharpness_label.setText("0")
+
+        # Reset viewer's adjuster and re-render
+        if hasattr(self, 'viewer') and self.viewer:
+            self.viewer.adjuster.settings.reset()
+            self.viewer.renderVolume()
+
+    def applyAdjustmentsToVolume(self):
+        """Apply current adjustments permanently to the volume data"""
+        if not hasattr(self, 'viewer') or not self.viewer:
+            return
+
+        if self.viewer.current_volume is None:
+            QMessageBox.warning(self, "No Volume", "No volume data loaded.")
+            return
+
+        if self.viewer.adjuster.settings.is_default():
+            QMessageBox.information(self, "No Changes", "No adjustments to apply.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Apply Adjustments",
+            "This will apply the current adjustments to the volume data in memory.\n"
+            "The original image files on disk will NOT be modified.\n"
+            "You can reload the files to restore the original data.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            # Apply adjustments to get new volume
+            adjusted_volume = self.viewer.adjuster.apply_adjustments()
+
+            # Reset adjustments
+            self.resetAdjustments()
+
+            # Set the adjusted volume as the new current/original volume
+            self.setVolume(adjusted_volume)
+
+            QMessageBox.information(self, "Success", "Adjustments applied to volume.")
+
+    def exportAdjustmentSettings(self):
+        """Export current image adjustment settings to a text file"""
+        if not hasattr(self, 'viewer') or not self.viewer:
+            QMessageBox.warning(self, "Error", "No viewer available.")
+            return
+
+        # Get current settings
+        settings = self.viewer.adjuster.settings
+
+        # Prepare volume info
+        volume_info = None
+        if self.viewer.current_volume is not None:
+            vol = self.viewer.current_volume
+            volume_info = {
+                'Shape': f"{vol.shape}",
+                'Data Type': str(vol.dtype),
+                'Min Value': f"{vol.min():.2f}",
+                'Max Value': f"{vol.max():.2f}"
+            }
+
+        # Get save file path
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Adjustment Settings", "",
+            "Text Files (*.txt);;All Files (*)"
+        )
+
+        if not filename:
+            return
+
+        if not filename.lower().endswith('.txt'):
+            filename += '.txt'
+
+        # Export settings
+        if export_adjustment_settings(settings, filename, volume_info):
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Adjustment settings exported to:\n{filename}"
+            )
+        else:
+            QMessageBox.critical(
+                self, "Export Failed",
+                "Failed to export adjustment settings."
+            )
 
 def main():
     from vmm.splash import SplashScreen

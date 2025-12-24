@@ -179,20 +179,93 @@ def get_stylesheet():
             padding: 3px;
             color: {c['text_primary']};
         }}
+        QSpinBox::up-button, QDoubleSpinBox::up-button {{
+            subcontrol-origin: border;
+            subcontrol-position: top right;
+            width: 16px;
+            border-left: 1px solid {c['border']};
+            border-bottom: 1px solid {c['border']};
+            background-color: {c['bg_secondary']};
+        }}
+        QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {{
+            background-color: {c['bg_tertiary']};
+        }}
+        QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed {{
+            background-color: {c['accent']};
+        }}
+        QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-bottom: 4px solid {c['text_primary']};
+            width: 0px;
+            height: 0px;
+        }}
+        QSpinBox::down-button, QDoubleSpinBox::down-button {{
+            subcontrol-origin: border;
+            subcontrol-position: bottom right;
+            width: 16px;
+            border-left: 1px solid {c['border']};
+            border-top: 1px solid {c['border']};
+            background-color: {c['bg_secondary']};
+        }}
+        QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+            background-color: {c['bg_tertiary']};
+        }}
+        QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+            background-color: {c['accent']};
+        }}
+        QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+            image: none;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
+            border-top: 4px solid {c['text_primary']};
+            width: 0px;
+            height: 0px;
+        }}
+        QComboBox {{
+            padding-right: 20px;
+        }}
+        QComboBox:hover {{
+            border-color: {c['accent']};
+        }}
+        QComboBox:focus {{
+            border-color: {c['accent']};
+        }}
         QComboBox::drop-down {{
-            border: none;
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 20px;
+            border-left: 1px solid {c['border']};
+            background-color: {c['bg_secondary']};
+        }}
+        QComboBox::drop-down:hover {{
+            background-color: {c['bg_tertiary']};
         }}
         QComboBox::down-arrow {{
             image: none;
             border-left: 5px solid transparent;
             border-right: 5px solid transparent;
             border-top: 5px solid {c['text_primary']};
-            margin-right: 5px;
         }}
         QComboBox QAbstractItemView {{
             background-color: {c['bg_input']};
             color: {c['text_primary']};
-            selection-background-color: {c['scrollbar_handle']};
+            border: 1px solid {c['border']};
+            selection-background-color: {c['accent']};
+            selection-color: {c['text_white']};
+            outline: none;
+        }}
+        QComboBox QAbstractItemView::item {{
+            padding: 4px 8px;
+            min-height: 20px;
+        }}
+        QComboBox QAbstractItemView::item:hover {{
+            background-color: {c['bg_tertiary']};
+        }}
+        QComboBox QAbstractItemView::item:selected {{
+            background-color: {c['accent']};
+            color: {c['text_white']};
         }}
         QSlider::groove:horizontal {{
             background: {c['bg_tertiary']};

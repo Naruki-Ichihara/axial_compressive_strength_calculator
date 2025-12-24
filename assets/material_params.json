@@ -9,9 +9,9 @@
     "n": 10
   },
   "AS4/PEEK": {
-    "longitudinal_modulus": 164000,
-    "transverse_modulus": 9100,
-    "poisson_ratio": 0.3,
+    "longitudinal_modulus": 112700,
+    "transverse_modulus": 10000,
+    "poisson_ratio": 0.29,
     "shear_modulus": 5450,
     "tau_y": 46.4,
     "K": 0.00321,
