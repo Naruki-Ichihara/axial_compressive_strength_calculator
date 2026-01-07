@@ -139,7 +139,7 @@ def estimate_compression_strength_from_profile(orientation_profile: np.ndarray,
     probability, bins = np.histogram(flatten_orientation_profile,
                                      bins=int(maximum_fiber_misalignment/fiber_misalignment_step_size), 
                                      density=True, range=(0, maximum_fiber_misalignment))
-    for i in range(1, len(probability)):
+    for i in range(len(probability)):
         probability[i] = probability[i]*fiber_misalignment_step_size
     
     total_probability = np.sum(probability)
